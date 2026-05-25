@@ -1,6 +1,7 @@
 """BPM 估计 — 混合 FFT + 时域峰值检测 (MATLAB breath_test.m + PhaseProcess.m)"""
 
 import numpy as np
+import warnings
 
 
 def estimate_bpm(
@@ -45,9 +46,11 @@ def estimate_bpm(
     peak_idx = np.argmax(band_spectrum)
     peak_freq = band_freqs[peak_idx]
 
-    # 计算 peak prominence
+    # 计算 peak prominence (抑制平坦频谱的零显著性警告)
     from scipy.signal import peak_prominences
-    prom_raw = peak_prominences(band_spectrum, [peak_idx])[0][0]
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", "some peaks have a prominence of 0")
+        prom_raw = peak_prominences(band_spectrum, [peak_idx])[0][0]
     max_val = float(np.max(band_spectrum))
     if max_val > 0:
         prominence_norm = max(0.1, min(1.0, prom_raw / max_val))
