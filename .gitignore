@@ -1,0 +1,21 @@
+# Manuals and reference docs
+*.pdf
+
+# Data files
+data/
+
+# Algorithm reference (MATLAB)
+algorithm/
+
+# Documentation
+docs/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.idea/
+
+# Logs
+logs/
+.claude/
