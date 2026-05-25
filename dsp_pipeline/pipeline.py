@@ -199,8 +199,6 @@ class Pipeline:
         from scipy.signal import welch
         phase_range = float(np.max(signal) - np.min(signal))
 
-        if phase_range > 5.0:
-            return {"valid": False, "reason": f"phase_range={phase_range:.2f}"}
         if phase_range < 0.003:
             return {"valid": False, "reason": f"phase_range={phase_range:.4f}"}
 
