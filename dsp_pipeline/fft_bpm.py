@@ -8,27 +8,53 @@ def estimate_bpm(
     fs: float,
     valid_band: tuple[float, float],
     n_fft: int = 4096,
-) -> float:
-    """FFT 峰值估计 (用于心率等弱周期信号)"""
+    f0: float = 0.0,
+) -> tuple[float, float]:
+    """FFT 峰值估计, 返回 (bpm, prominence_norm)
+
+    Args:
+        f0: 呼吸基频 (Hz), >0 时启用谐波软衰减
+    """
     n = len(signal)
     if n < 16:
-        return 0.0
+        return 0.0, 0.0
 
     t = np.arange(n)
-    poly = np.polyfit(t, signal, 3)
+    poly = np.polyfit(t, signal, 1)  # 线性去趋势 (原为三次)
     detrended = signal - np.polyval(poly, t)
 
     windowed = detrended * np.hanning(n)
     spectrum = np.abs(np.fft.rfft(windowed, n=n_fft))
     freqs = np.fft.rfftfreq(n_fft, d=1.0 / fs)
 
+    # 谐波软衰减
+    harmonic_info = {"harmonic_overlap": False, "masked_harmonics": []}
+    if f0 > 0 and any((freqs >= valid_band[0]) & (freqs <= valid_band[1])):
+        from dsp_pipeline.harmonic_mask import apply_harmonic_attenuation
+        spectrum, harmonic_info = apply_harmonic_attenuation(
+            spectrum, freqs, f0, valid_band
+        )
+
     mask = (freqs >= valid_band[0]) & (freqs <= valid_band[1])
     if not np.any(mask):
-        return 0.0
+        return 0.0, 0.0
 
-    peak_idx = np.argmax(spectrum[mask])
-    peak_freq = freqs[mask][peak_idx]
+    band_spectrum = spectrum[mask]
+    band_freqs = freqs[mask]
 
+    peak_idx = np.argmax(band_spectrum)
+    peak_freq = band_freqs[peak_idx]
+
+    # 计算 peak prominence
+    from scipy.signal import peak_prominences
+    prom_raw = peak_prominences(band_spectrum, [peak_idx])[0][0]
+    max_val = float(np.max(band_spectrum))
+    if max_val > 0:
+        prominence_norm = max(0.1, min(1.0, prom_raw / max_val))
+    else:
+        prominence_norm = 0.1
+
+    # 重心精炼
     delta = peak_freq * 0.05
     refine_mask = (freqs >= peak_freq - delta) & (freqs <= peak_freq + delta)
     if np.any(refine_mask):
@@ -37,7 +63,7 @@ def estimate_bpm(
     else:
         refined_freq = peak_freq
 
-    return refined_freq * 60.0
+    return refined_freq * 60.0, prominence_norm
 
 
 def estimate_breath_bpm_time_domain(
@@ -101,30 +127,47 @@ def estimate_breath_bpm_time_domain(
     return bpm
 
 
-def kalman_smooth(measurements: list[float], q: float = 1e-4, r: float = 0.1) -> float:
-    """卡尔曼平滑 — 响应更快的参数"""
+def kalman_smooth(
+    measurements: list[float],
+    q: float = 1e-4,
+    r: float = 0.5,
+    prominences: list[float] | None = None,
+) -> float:
+    """卡尔曼平滑 — 支持 prominence 驱动的自适应观测噪声
+
+    Args:
+        measurements: 历次 BPM 测量值
+        q: 过程噪声协方差
+        r: 基础观测噪声协方差 (prominence=1.0 时使用)
+        prominences: 历次 peak prominence (0.1~1.0), R_effective = r / prominence
+    """
     if not measurements:
         return 0.0
 
-    # 只用最近的 15 个值 (更快响应)
     recent = measurements[-15:]
+    n = len(recent)
+
+    if prominences is not None and len(prominences) >= n:
+        r_values = [r / prominences[-n + i] for i in range(n)]
+    else:
+        r_values = [r] * n
 
     x_est = recent[0]
     p = 1.0
-    x_filtered = np.zeros(len(recent))
+    x_filtered = np.zeros(n)
 
-    for k, z in enumerate(recent):
+    for k, (z, r_k) in enumerate(zip(recent, r_values)):
         x_pred = x_est
         p_pred = p + q
-        k_gain = p_pred / (p_pred + r)
+        k_gain = p_pred / (p_pred + r_k)
         x_est = x_pred + k_gain * (z - x_pred)
         p = (1 - k_gain) * p_pred
         x_filtered[k] = x_est
 
-    # 返回最近的 Kalman 估计值 (不是历史平均)
     return float(x_filtered[-1])
 
 
 # 向后兼容
 def fft_peak_to_bpm(signal, fs=20.0, valid_band=(0.1, 3.0)):
-    return estimate_bpm(signal, fs, valid_band)
+    bpm, _ = estimate_bpm(signal, fs, valid_band)
+    return bpm
