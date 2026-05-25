@@ -38,7 +38,7 @@ class Pipeline:
         self._heart_history: list[float] = []
 
         # 屏息状态机
-        self._apnea_threshold: float | None = 0.003  # 校准前默认值
+        self._apnea_threshold: float | None = 0.005  # 校准前默认值
         self._calibration_samples: list[float] = []
         self._calibration_done: bool = False
         self._in_apnea: bool = False
@@ -105,10 +105,13 @@ class Pipeline:
         breath_signal = self._filter.filter_breath(enhanced)
         heart_signal = self._filter.filter_heart(enhanced)
 
-        # 6. 计算 phase_range (用于自动校准和屏息检测)
+        # 6. 计算信号能量指标
         phase_range = float(np.max(enhanced) - np.min(enhanced))
+        breath_energy = float(np.var(breath_signal))
+        total_energy = float(np.var(enhanced)) + 1e-10
+        breath_power_ratio = breath_energy / total_energy
 
-        # 7. 自动校准 (系统启动后在前200个完整窗口中收集样本)
+        # 7. 自动校准 (系统启动后在前200个完整窗口中收集 phase_range 样本)
         if not self._calibration_done and len(self._phase_buffer) >= WINDOW_SIZE:
             self._calibration_samples.append(phase_range)
             if len(self._calibration_samples) >= 200:
@@ -118,8 +121,18 @@ class Pipeline:
                 self._apnea_threshold = max(0.001, mean_val - 2 * std_val)
                 self._calibration_done = True
 
-        # 8. 屏息状态机
-        if self._calibration_done and phase_range < self._apnea_threshold:
+        # 8. 屏息状态机 (双重触发: 能量极低 或 phase_range 过低)
+        # breath_power_ratio < 0.15: 呼吸频带能量占比极低, 无需校准即可触发
+        # phase_range < 0.005: 绝对下限保护, 始终生效
+        # phase_range < calibrated_threshold: 校准后自适应阈值
+        in_low_signal = (
+            breath_power_ratio < 0.15
+            or phase_range < 0.005
+        )
+        if self._calibration_done:
+            in_low_signal = in_low_signal or (phase_range < self._apnea_threshold)
+
+        if in_low_signal:
             if not self._in_apnea:
                 self._in_apnea = True
                 self._apnea_start_time = time.time()
@@ -142,7 +155,7 @@ class Pipeline:
                 quality={
                     "valid": True, "reason": "apnea", "phase_range": phase_range,
                     "apnea_state": True, "harmonic_overlap": False,
-                    "heart_prominence": 0.0, "breath_ratio": 0.0,
+                    "heart_prominence": 0.0, "breath_ratio": breath_power_ratio,
                 },
             )
         elif self._in_apnea:
@@ -155,8 +168,15 @@ class Pipeline:
         breath_bpm = 0.0
         heart_bpm = 0.0
         if self._frame_count - self._last_bpm_update >= BPM_UPDATE_INTERVAL:
-            # 呼吸: 时域峰值检测 (替代原有 FFT 方法)
-            breath_bpm = estimate_breath_bpm_time_domain(breath_signal, fs=FS_HZ)
+            # 呼吸: 时域峰值检测 (min_interval=1.5s -> 上限 40 BPM)
+            breath_bpm = estimate_breath_bpm_time_domain(
+                breath_signal, fs=FS_HZ, min_interval_sec=1.5
+            )
+            # 时域检测失败时, 回退到 FFT (确保 f0 有效, 谐波掩码能工作)
+            if breath_bpm <= 0:
+                breath_bpm, _ = estimate_bpm(
+                    breath_signal, FS_HZ, (0.1, 0.8), n_fft=1024
+                )
             if breath_bpm > 0:
                 self._last_valid_breath_bpm = breath_bpm
                 self._breath_history.append(breath_bpm)
@@ -199,7 +219,7 @@ class Pipeline:
         from scipy.signal import welch
         phase_range = float(np.max(signal) - np.min(signal))
 
-        if phase_range < 0.003:
+        if phase_range < 0.005:
             return {"valid": False, "reason": f"phase_range={phase_range:.4f}"}
 
         freqs, psd = welch(signal, fs=FS_HZ, nperseg=min(128, len(signal)))
