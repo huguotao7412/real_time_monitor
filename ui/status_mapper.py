@@ -15,7 +15,7 @@ def map_status(quality: dict[str, Any] | None) -> tuple[str, str]:
         return ("● 待机", "normal")
 
     if quality.get("apnea_state"):
-        return ("监测到呼吸微弱或屏息状态", "error")
+        return ("呼吸较浅，请放松", "warning")
 
     phase_range = quality.get("phase_range", 0.0)
     breath_ratio = quality.get("breath_ratio", 0.0)

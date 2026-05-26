@@ -65,6 +65,7 @@ class Pipeline:
         self._apnea_hold_breath: float = 0.0
         self._apnea_hold_heart: float = 0.0
         self._recovery_count: int = 0
+        self._low_signal_frame_count: int = 0
         self._last_valid_breath_bpm: float = 0.0
         self._last_valid_heart_bpm: float = 0.0
 
@@ -273,7 +274,7 @@ class Pipeline:
                 self._apnea_threshold = max(0.001, mean_val - 2 * std_val)
                 self._calibration_done = True
 
-        # 屏息状态机
+        # 屏息状态机: 需连续 50 帧 (2.5s @20fps) 低信号才触发
         in_low_signal = (
             breath_power_ratio < 0.15
             or phase_range < 0.005
@@ -282,12 +283,17 @@ class Pipeline:
             in_low_signal = in_low_signal or (phase_range < self._apnea_threshold)
 
         if in_low_signal:
-            return self._handle_apnea(breath_signal, phase_range, breath_power_ratio)
+            self._low_signal_frame_count += 1
+        else:
+            self._low_signal_frame_count = 0
+            if self._in_apnea:
+                self._in_apnea = False  # 1 帧正常即恢复
+
+        if self._low_signal_frame_count >= 50 and not self._in_apnea:
+            self._in_apnea = True
+            self._apnea_start_time = time.time()
         elif self._in_apnea:
-            self._recovery_count += 1
-            if self._recovery_count >= 3:
-                self._in_apnea = False
-                self._recovery_count = 0
+            return self._handle_apnea(breath_signal, phase_range, breath_power_ratio)
 
         # BPM 估计
         breath_bpm = self._last_valid_breath_bpm
@@ -363,25 +369,14 @@ class Pipeline:
     def _handle_apnea(
         self, breath_signal: np.ndarray, phase_range: float, breath_power_ratio: float
     ) -> VitalSigns:
-        if not self._in_apnea:
-            self._in_apnea = True
-            self._apnea_start_time = time.time()
-            self._apnea_hold_breath = self._last_valid_breath_bpm
-            self._apnea_hold_heart = self._last_valid_heart_bpm
-        elapsed = time.time() - self._apnea_start_time
-        if elapsed < 4.0:
-            decay = 1.0 - (elapsed / 4.0)
-            breath_bpm = self._apnea_hold_breath * decay
-            heart_bpm = self._apnea_hold_heart * decay
-        else:
-            breath_bpm = 0.0
-            heart_bpm = 0.0
         self._recovery_count = 0
         self.last_heartbeat = time.time()
         return VitalSigns(
-            timestamp=time.time(), frame_index=0,
-            breath_waveform=breath_signal, breath_bpm=round(breath_bpm, 1),
-            heart_bpm=round(heart_bpm, 1), heart_waveform=np.array([]),
+            timestamp=time.time(), frame_index=self._frame_count,
+            breath_waveform=breath_signal,
+            breath_bpm=round(self._last_valid_breath_bpm, 1),
+            heart_bpm=round(self._last_valid_heart_bpm, 1),
+            heart_waveform=np.array([]),
             quality={
                 "valid": True, "reason": "apnea", "phase_range": phase_range,
                 "apnea_state": True, "harmonic_overlap": False,
