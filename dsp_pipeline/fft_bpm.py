@@ -174,3 +174,147 @@ def kalman_smooth(
 def fft_peak_to_bpm(signal, fs=20.0, valid_band=(0.1, 3.0)):
     bpm, _ = estimate_bpm(signal, fs, valid_band)
     return bpm
+
+
+# === STFT + Kalman hybrid BPM estimation (MATLAB PhaseProcess port) ===
+
+def estimate_bpm_stft(
+    breath_signal: np.ndarray,
+    heart_signal: np.ndarray,
+    fs: float = 20.0,
+    n_fft: int = 1024,
+) -> tuple[float, float]:
+    """STFT-based BPM estimation with Kalman smoothing and FFT hybrid.
+
+    Port of PhaseProcess.perform_stft_analysis + estimate_vital_signs_from_stft.
+
+    Breath: STFT ridge extraction -> Kalman filter -> mean frequency * 60.
+    Heart: STFT ridge -> Kalman -> sort & trim top 4 -> mean,
+           then min(STFT_KF, FFT_peak) as upper bound.
+
+    Args:
+        breath_signal: WPD-reconstructed breath waveform.
+        heart_signal: WPD-reconstructed heart waveform.
+        fs: Sampling rate.
+        n_fft: Base FFT size for STFT.
+
+    Returns:
+        (breath_bpm, heart_bpm)
+    """
+    from scipy.signal import stft, detrend
+
+    n = len(breath_signal)
+    if n < 64:
+        return 0.0, 0.0
+
+    # --- Breath STFT ---
+    breath_win = max(32, int(n * 3 / 4))
+    breath_overlap = int(breath_win * 0.8)
+    nfft_b = max(n_fft, 2 ** int(np.ceil(np.log2(breath_win))))
+
+    breath_dt = detrend(breath_signal, type='linear')
+    f_b, t_b, Zxx_b = stft(
+        breath_dt, fs, window='hamming', nperseg=breath_win,
+        noverlap=breath_overlap, nfft=nfft_b,
+    )
+    mag_b = np.abs(Zxx_b)
+
+    breath_bpm = _extract_bpm_from_stft(f_b, mag_b, (0.1, 0.8), 'breath')
+
+    # --- Heart STFT ---
+    heart_win = max(32, int(n // 4))
+    heart_overlap = int(heart_win * 0.8)
+    nfft_h = max(n_fft, 2 ** int(np.ceil(np.log2(heart_win))))
+
+    f_h, t_h, Zxx_h = stft(
+        heart_signal, fs, window='hamming', nperseg=heart_win,
+        noverlap=heart_overlap, nfft=nfft_h,
+    )
+    mag_h = np.abs(Zxx_h)
+
+    heart_bpm_stft = _extract_bpm_from_stft(f_h, mag_h, (1.0, 2.0), 'heart')
+
+    # FFT fallback for heart: upper bound
+    heart_fft_bpm, _ = estimate_bpm(heart_signal, fs, (1.0, 2.0))
+
+    if heart_bpm_stft > 0 and heart_fft_bpm > 0:
+        heart_bpm = min(heart_bpm_stft, heart_fft_bpm)
+    elif heart_bpm_stft > 0:
+        heart_bpm = heart_bpm_stft
+    else:
+        heart_bpm = heart_fft_bpm
+
+    return breath_bpm, heart_bpm
+
+
+def _extract_bpm_from_stft(
+    frequencies: np.ndarray,
+    magnitude: np.ndarray,
+    freq_band: tuple[float, float],
+    signal_type: str = 'breath',
+) -> float:
+    """Extract BPM from STFT magnitude via ridge extraction + Kalman filter.
+
+    MATLAB: extract_raw_trace + kalman_filter_trace.
+
+    Args:
+        frequencies: STFT frequency axis (Hz).
+        magnitude: STFT magnitude matrix [n_freqs, n_times].
+        freq_band: (lo, hi) frequency range for ridge search.
+        signal_type: 'breath' or 'heart' (affects Kalman Q/R).
+
+    Returns:
+        BPM value, or 0.0 on failure.
+    """
+    f_lo, f_hi = freq_band
+    mask = (frequencies >= f_lo) & (frequencies <= f_hi)
+
+    if not np.any(mask):
+        return 0.0
+
+    f_roi = frequencies[mask]
+    mag_roi = magnitude[mask, :]
+
+    if mag_roi.shape[1] < 2:
+        return 0.0
+
+    # Ridge extraction: max magnitude per time column
+    max_indices = np.argmax(mag_roi, axis=0)
+    trace_hz = f_roi[max_indices]
+
+    # Kalman filter the trace
+    if signal_type == 'breath':
+        q, r_val = 1e-4, 0.1
+    else:
+        q, r_val = 1e-3, 0.5
+
+    kf_trace = _kalman_filter_trace(trace_hz, trace_hz[0], q, r_val)
+
+    if signal_type == 'heart':
+        # MATLAB: sort and trim top 4 outliers before mean
+        sorted_kf = np.sort(kf_trace)
+        if len(sorted_kf) > 4:
+            kf_trimmed = sorted_kf[:-4]
+        else:
+            kf_trimmed = sorted_kf
+        return float(np.mean(kf_trimmed)) * 60.0
+    else:
+        return float(np.mean(kf_trace)) * 60.0
+
+
+def _kalman_filter_trace(
+    z: np.ndarray, x_init: float, q: float, r: float
+) -> np.ndarray:
+    """1D Kalman filter on a frequency trace (MATLAB kalman_filter_trace)."""
+    n = len(z)
+    x_filt = np.zeros(n)
+    x_est = x_init
+    p = 1.0
+    for k in range(n):
+        x_pred = x_est
+        p_pred = p + q
+        k_gain = p_pred / (p_pred + r)
+        x_est = x_pred + k_gain * (z[k] - x_pred)
+        p = (1 - k_gain) * p_pred
+        x_filt[k] = x_est
+    return x_filt
