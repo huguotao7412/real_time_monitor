@@ -1,16 +1,18 @@
-"""主窗口 — 离线回放模式: 读取 .bin 文件 → DSP → 实时波形显示"""
+"""Main window — thin shell hosting SubjectTab and ResearchTab via QTabWidget."""
 
 import os
 import glob
 import time
 import queue
+import csv
 import threading
 from datetime import datetime
 
 import numpy as np
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QFileDialog, QMessageBox, QLabel, QSplitter, QPushButton,
+    QFileDialog, QMessageBox, QLabel, QPushButton,
+    QTabWidget,
 )
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QFont
@@ -23,7 +25,9 @@ from io_engine.uart_parser import UartParser
 from io_engine.serial_manager import SerialManager
 from io_engine.radar_mgr import RadarMgr
 from models.radar_frame import RadarFrame, FrameHeader
-from ui.wave_widget import WaveWidget
+
+from ui.subject_tab import SubjectTab
+from ui.research_tab import ResearchTab
 
 
 class MainWindow(QMainWindow):
@@ -41,6 +45,10 @@ class MainWindow(QMainWindow):
         self._frame_count: int = 0
         self._running: bool = False
         self._latest_vitals: VitalSigns | None = None
+        self._trend_tick_counter: int = 0
+
+        # CSV data store — accumulate all vitals snapshots during session
+        self._csv_rows: list[dict] = []
 
         # Serial mode
         self._serial_mgr: SerialManager | None = None
@@ -61,110 +69,90 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
+        main_layout.setContentsMargins(0, 0, 0, 0)
 
-        # Title + file selector
+        # Title bar
         title_row = QHBoxLayout()
-        title = QLabel("RS6240 毫米波雷达生命体征实时监测系统")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
+        title_row.setContentsMargins(12, 8, 12, 4)
+        title = QLabel("RS6240 生命体征监测系统")
+        title.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
         title_row.addWidget(title, stretch=1)
 
-        self.file_label = QLabel("未选择文件")
-        self.file_label.setStyleSheet("color: #95a5a6; font-size: 10pt;")
-        title_row.addWidget(self.file_label)
+        self._file_label = QLabel("未选择文件")
+        self._file_label.setStyleSheet("color: #95a5a6; font-size: 9pt;")
+        title_row.addWidget(self._file_label)
 
-        self.select_btn = QPushButton("选择文件")
-        self.select_btn.clicked.connect(self._on_select_file)
-        title_row.addWidget(self.select_btn)
+        if self._mode == "replay":
+            self._select_btn = QPushButton("选择文件")
+            self._select_btn.clicked.connect(self._on_select_file)
+            title_row.addWidget(self._select_btn)
+
         main_layout.addLayout(title_row)
 
-        # Waveforms
-        wave_splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.breath_wave = WaveWidget("呼吸波形 (0.1-0.6 Hz)", "Amplitude")
-        self.heart_wave = WaveWidget("心率波形 (0.8-2.5 Hz)", "Amplitude")
-        wave_splitter.addWidget(self.breath_wave)
-        wave_splitter.addWidget(self.heart_wave)
-        main_layout.addWidget(wave_splitter, stretch=3)
+        # Tab widget
+        self._tabs = QTabWidget()
+        self._subject_tab = SubjectTab()
+        self._research_tab = ResearchTab()
+        self._tabs.addTab(self._subject_tab, "监测")
+        self._tabs.addTab(self._research_tab, "研究")
+        main_layout.addWidget(self._tabs, stretch=1)
 
-        # BPM display
-        bpm_widget = QWidget()
-        bpm_layout = QHBoxLayout(bpm_widget)
-        bpm_font = QFont("Segoe UI", 28, QFont.Weight.Bold)
-
-        for name, color in [("呼吸频率", "#27ae60"), ("心率", "#e74c3c")]:
-            group = QVBoxLayout()
-            lbl = QLabel(name)
-            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl.setFont(QFont("Segoe UI", 12))
-            group.addWidget(lbl)
-            val = QLabel("--")
-            val.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            val.setFont(bpm_font)
-            val.setStyleSheet(f"color: {color};")
-            group.addWidget(val)
-            if name == "呼吸频率":
-                self.breath_bpm_value = val
-            else:
-                self.heart_bpm_value = val
-            bpm_layout.addLayout(group)
-        main_layout.addWidget(bpm_widget)
-
-        # Controls
-        ctrl_widget = QWidget()
-        ctrl_layout = QHBoxLayout(ctrl_widget)
+        # Control bar
+        ctrl_row = QHBoxLayout()
+        ctrl_row.setContentsMargins(12, 4, 12, 8)
 
         label = "▶ 开始采集" if self._mode == "serial" else "▶ 开始回放"
-        self.start_btn = QPushButton(label)
-        self.start_btn.setStyleSheet(
+        self._start_btn = QPushButton(label)
+        self._start_btn.setStyleSheet(
             "QPushButton { background-color: #27ae60; color: white; font-weight: bold; "
-            "padding: 10px 24px; border-radius: 4px; font-size: 12pt; }"
+            "padding: 8px 20px; border-radius: 4px; font-size: 11pt; }"
             "QPushButton:hover { background-color: #2ecc71; }"
             "QPushButton:disabled { background-color: #95a5a6; }"
         )
-        self.start_btn.clicked.connect(self._on_start)
-        ctrl_layout.addWidget(self.start_btn)
+        self._start_btn.clicked.connect(self._on_start)
+        ctrl_row.addWidget(self._start_btn)
 
-        self.stop_btn = QPushButton("■ 停止")
-        self.stop_btn.setEnabled(False)
-        self.stop_btn.setStyleSheet(
+        self._stop_btn = QPushButton("■ 停止")
+        self._stop_btn.setEnabled(False)
+        self._stop_btn.setStyleSheet(
             "QPushButton { background-color: #e74c3c; color: white; font-weight: bold; "
-            "padding: 10px 24px; border-radius: 4px; font-size: 12pt; }"
+            "padding: 8px 20px; border-radius: 4px; font-size: 11pt; }"
             "QPushButton:hover { background-color: #c0392b; }"
             "QPushButton:disabled { background-color: #95a5a6; }"
         )
-        self.stop_btn.clicked.connect(self._on_stop)
-        ctrl_layout.addWidget(self.stop_btn)
+        self._stop_btn.clicked.connect(self._on_stop)
+        ctrl_row.addWidget(self._stop_btn)
 
-        self.save_btn = QPushButton("💾 保存当前数据")
-        self.save_btn.clicked.connect(self._on_save)
-        ctrl_layout.addWidget(self.save_btn)
+        self._save_btn = QPushButton("保存数据")
+        self._save_btn.clicked.connect(self._on_save)
+        ctrl_row.addWidget(self._save_btn)
 
-        ctrl_layout.addStretch()
+        ctrl_row.addStretch()
 
-        self.status_label = QLabel("● 待机")
-        self.status_label.setFont(QFont("Segoe UI", 11))
-        self.status_label.setStyleSheet("color: #f39c12;")
-        ctrl_layout.addWidget(self.status_label)
+        self._status_label = QLabel("● 待机")
+        self._status_label.setFont(QFont("Segoe UI", 10))
+        self._status_label.setStyleSheet("color: #f39c12;")
+        ctrl_row.addWidget(self._status_label)
 
-        self.frame_rate_label = QLabel("帧率: --")
-        ctrl_layout.addWidget(self.frame_rate_label)
+        self._frame_rate_label = QLabel("帧率: --")
+        ctrl_row.addWidget(self._frame_rate_label)
 
-        self.elapsed_label = QLabel("运行: 00:00")
-        ctrl_layout.addWidget(self.elapsed_label)
+        self._elapsed_label = QLabel("运行: 00:00")
+        ctrl_row.addWidget(self._elapsed_label)
 
-        main_layout.addWidget(ctrl_widget)
+        main_layout.addLayout(ctrl_row)
 
-        # Auto-select latest file on startup
-        if not self._replay_file:
+        # Auto-select latest file
+        if self._mode == "replay" and not self._replay_file:
             self._replay_file = self._find_latest_bin()
         if self._replay_file:
-            self.file_label.setText(os.path.basename(self._replay_file))
-            self.file_label.setStyleSheet("color: #3498db; font-size: 10pt;")
+            self._file_label.setText(os.path.basename(self._replay_file))
+            self._file_label.setStyleSheet("color: #3498db; font-size: 9pt;")
 
     def _setup_timers(self) -> None:
         self._ui_timer = QTimer()
         self._ui_timer.timeout.connect(self._on_ui_tick)
-        self._ui_timer.start(UI_REFRESH_MS)  # ~30 fps
+        self._ui_timer.start(UI_REFRESH_MS)
 
     @staticmethod
     def _find_latest_bin() -> str | None:
@@ -183,8 +171,8 @@ class MainWindow(QMainWindow):
         )
         if path:
             self._replay_file = path
-            self.file_label.setText(os.path.basename(path))
-            self.file_label.setStyleSheet("color: #3498db; font-size: 10pt;")
+            self._file_label.setText(os.path.basename(path))
+            self._file_label.setStyleSheet("color: #3498db; font-size: 9pt;")
 
     def _on_start(self) -> None:
         if self._mode == "serial":
@@ -193,14 +181,12 @@ class MainWindow(QMainWindow):
             self._start_replay()
 
     def _start_serial(self) -> None:
-        # Disable button immediately
-        self.start_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
-        self.select_btn.setEnabled(False)
-        self.status_label.setText("● 启动中...")
-        self.status_label.setStyleSheet("color: #f39c12;")
-
-        # Move ALL serial init to background thread (prevents UI freeze)
+        self._start_btn.setEnabled(False)
+        self._stop_btn.setEnabled(True)
+        if hasattr(self, '_select_btn'):
+            self._select_btn.setEnabled(False)
+        self._status_label.setText("● 启动中...")
+        self._status_label.setStyleSheet("color: #f39c12;")
         thread = threading.Thread(target=self._serial_init_thread, daemon=True)
         thread.start()
 
@@ -216,7 +202,6 @@ class MainWindow(QMainWindow):
     def _do_serial_init(self) -> None:
         import serial.tools.list_ports
         print("[Serial Init] Scanning ports...")
-
         ports = SerialManager.list_ports()
         ctrl_port = data_port = ""
         for p in ports:
@@ -229,32 +214,27 @@ class MainWindow(QMainWindow):
                 ctrl_port = p
             if "Enhanced" in desc:
                 data_port = p
-
         print(f"[Serial Init] Found: ctrl={ctrl_port}, data={data_port}")
-
         if not ctrl_port or not data_port:
             self._serial_status = f"未找到雷达: ctrl={ctrl_port} data={data_port}"
             return
-
         print("[Serial Init] Connecting...")
         if not self._radar_mgr.connect(ctrl_port, data_port):
             self._serial_status = f"连接失败 {ctrl_port}/{data_port}"
             return
-
         print("[Serial Init] Booting radar...")
         ok = self._radar_mgr.boot()
         print(f"[Serial Init] Boot {'OK' if ok else 'PARTIAL FAIL'}")
-
         self._stop_event = threading.Event()
         self._uart_parser.reset()
         self._pipeline = Pipeline()
         self._pipeline.start()
-
         self._start_time = time.time()
         self._frame_count = 0
         self._running = True
+        self._csv_rows.clear()
+        self._research_tab.start()
         self._serial_status = f"采集中 ({ctrl_port}/{data_port})"
-
         print("[Serial Init] Starting I/O loop...")
         self._io_thread = threading.Thread(target=self._serial_io_loop, daemon=True)
         self._io_thread.start()
@@ -269,15 +249,13 @@ class MainWindow(QMainWindow):
                 frames = self._uart_parser.feed(raw)
                 for fft_data in frames:
                     self._frame_count += 1
-                    # Reshape [1024] → [TX=2, RX=4, BIN=128]
                     cube = fft_data.reshape(2, 4, 128)
-                    # Combine all RX channels for TX0 (better SNR)
-                    rx_combined = np.mean(cube[0, :, :], axis=0)  # [128] avg over 4 RX
+                    rx_combined = np.mean(cube[0, :, :], axis=0)
                     frame = RadarFrame(
                         timestamp=time.time(),
                         frame_index=self._frame_count,
                         header=FrameHeader(0, 1, 4, 2, 58000, 128, 1, 3000, 25, 1920, 60),
-                        data_cube=rx_combined.reshape(-1, 1, 1),  # [128, 1, 1]
+                        data_cube=rx_combined.reshape(-1, 1, 1),
                     )
                     while True:
                         try:
@@ -296,56 +274,50 @@ class MainWindow(QMainWindow):
         if not self._replay_file or not os.path.exists(self._replay_file):
             QMessageBox.critical(self, "错误", "请先选择有效的 .bin 文件")
             return
-
         reader = BinFileReader(self._replay_file)
         if not reader.open():
             QMessageBox.critical(self, "错误", f"无法打开 {self._replay_file}")
             return
-
         self._bin_reader = reader
         self._pipeline = Pipeline()
         self._pipeline.start()
-
         self._start_time = time.time()
         self._frame_count = 0
         self._running = True
-
-        self.start_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
-        self.select_btn.setEnabled(False)
-        self.status_label.setText("● 回放中")
-        self.status_label.setStyleSheet("color: #27ae60;")
-
-        # Feed frames at 20 fps via timer
+        self._csv_rows.clear()
+        self._research_tab.start()
+        self._start_btn.setEnabled(False)
+        self._stop_btn.setEnabled(True)
+        if hasattr(self, '_select_btn'):
+            self._select_btn.setEnabled(False)
+        self._status_label.setText("● 回放中")
+        self._status_label.setStyleSheet("color: #27ae60;")
         self._replay_timer = QTimer()
         self._replay_timer.timeout.connect(self._feed_one_frame)
-        self._replay_timer.start(50)  # 50ms = 20 fps
+        self._replay_timer.start(50)
 
     def _feed_one_frame(self) -> None:
         if not self._bin_reader:
             self._replay_timer.stop()
             return
-
         frames = self._bin_reader.read_frames(max_frames=1)
         if not frames:
             self._replay_timer.stop()
-            self.status_label.setText("● 回放完毕")
-            self.status_label.setStyleSheet("color: #3498db;")
-            self.stop_btn.setEnabled(False)
-            self.start_btn.setEnabled(True)
-            self.select_btn.setEnabled(True)
+            self._status_label.setText("● 回放完毕")
+            self._status_label.setStyleSheet("color: #3498db;")
+            self._stop_btn.setEnabled(False)
+            self._start_btn.setEnabled(True)
+            if hasattr(self, '_select_btn'):
+                self._select_btn.setEnabled(True)
             return
-
         self._frame_count += 1
-        cube = frames[0].reshape(-1, 1, 1)  # [bins, 1, 1]
-
+        cube = frames[0].reshape(-1, 1, 1)
         frame = RadarFrame(
             timestamp=time.time(),
             frame_index=self._frame_count,
             header=FrameHeader(0, 1, 1, 1, 58000, 128, 0, 3000, 25, 1920, 60),
             data_cube=cube,
         )
-
         while True:
             try:
                 self._pipeline.raw_queue.put_nowait(frame)
@@ -358,7 +330,6 @@ class MainWindow(QMainWindow):
 
     def _on_stop(self) -> None:
         self._running = False
-
         if self._mode == "serial":
             if self._radar_mgr:
                 self._radar_mgr.shutdown()
@@ -368,30 +339,29 @@ class MainWindow(QMainWindow):
                 self._io_thread.join(timeout=3)
             if self._serial_mgr:
                 self._serial_mgr.close()
-
         if self._replay_timer:
             self._replay_timer.stop()
             self._replay_timer = None
-
         if self._pipeline:
             self._pipeline.stop()
             self._pipeline = None
-
         if self._bin_reader:
             self._bin_reader.close()
             self._bin_reader = None
-
-        self.start_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
-        self.select_btn.setEnabled(True)
-        self.status_label.setText("● 已停止")
-        self.status_label.setStyleSheet("color: #f39c12;")
+        self._start_btn.setEnabled(True)
+        self._stop_btn.setEnabled(False)
+        if hasattr(self, '_select_btn'):
+            self._select_btn.setEnabled(True)
+        self._status_label.setText("● 已停止")
+        self._status_label.setStyleSheet("color: #f39c12;")
 
     def _on_save(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "选择保存目录")
         if not path:
             return
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # Save .npz (existing format)
         if self._latest_vitals is not None:
             np.savez(
                 f"{path}/vital_signs_{ts}.npz",
@@ -400,24 +370,39 @@ class MainWindow(QMainWindow):
                 breath_bpm=self._latest_vitals.breath_bpm,
                 heart_bpm=self._latest_vitals.heart_bpm,
             )
+
+        # Save .csv
+        if self._csv_rows:
+            csv_path = f"{path}/vital_signs_{ts}.csv"
+            fieldnames = [
+                "Timestamp", "FrameIndex", "RangeBin", "RawPhase",
+                "BreathBPM", "HeartBPM", "PhaseRange", "BreathRatio",
+                "HeartProminence", "ApneaFlag", "SQI_Level",
+            ]
+            with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(self._csv_rows)
+
         QMessageBox.information(self, "保存完成", f"数据已保存至 {path}")
 
     # === UI Timer ===
 
     def _on_ui_tick(self) -> None:
-        # Poll serial status from main thread
+        # Poll serial status
         if self._serial_status:
             s = self._serial_status
             if "失败" in s or "未找到" in s or "连接失败" in s:
-                self.status_label.setText(f"● {s}")
-                self.status_label.setStyleSheet("color: #e74c3c;")
-                self.start_btn.setEnabled(True)
-                self.stop_btn.setEnabled(False)
-                self.select_btn.setEnabled(True)
+                self._status_label.setText(f"● {s}")
+                self._status_label.setStyleSheet("color: #e74c3c;")
+                self._start_btn.setEnabled(True)
+                self._stop_btn.setEnabled(False)
+                if hasattr(self, '_select_btn'):
+                    self._select_btn.setEnabled(True)
             elif "采集中" in s:
-                self.status_label.setText(f"● {s}")
-                self.status_label.setStyleSheet("color: #27ae60;")
-            self._serial_status = ""  # Consumed
+                self._status_label.setText(f"● {s}")
+                self._status_label.setStyleSheet("color: #27ae60;")
+            self._serial_status = ""
 
         if not self._pipeline:
             return
@@ -430,29 +415,76 @@ class MainWindow(QMainWindow):
 
         if self._latest_vitals is not None:
             q = self._latest_vitals.quality
-            if q and not q.get("valid"):
-                # Signal quality failed — show why
-                self.breath_bpm_value.setText("--")
-                self.heart_bpm_value.setText("--")
-                self.status_label.setText(f"● 信号无效 ({q.get('reason', '')})")
-                self.status_label.setStyleSheet("color: #e74c3c;")
-            else:
-                self.breath_wave.set_data(self._latest_vitals.breath_waveform)
-                if len(self._latest_vitals.heart_waveform) > 0:
-                    self.heart_wave.set_data(self._latest_vitals.heart_waveform)
-                if self._latest_vitals.breath_bpm > 0:
-                    self.breath_bpm_value.setText(f"{self._latest_vitals.breath_bpm:.0f}")
-                if self._latest_vitals.heart_bpm > 0:
-                    self.heart_bpm_value.setText(f"{self._latest_vitals.heart_bpm:.0f}")
-                self.status_label.setText("● 运行中")
-                self.status_label.setStyleSheet("color: #27ae60;")
+            calib_done = self._pipeline.calibration_done
+            calib_prog = self._pipeline.calibration_progress
+
+            # Subject tab always gets data
+            self._subject_tab.update_display(
+                breath_bpm=self._latest_vitals.breath_bpm,
+                heart_bpm=self._latest_vitals.heart_bpm,
+                breath_waveform=self._latest_vitals.breath_waveform,
+                quality=q,
+                calibration_done=calib_done,
+                calibration_progress=calib_prog,
+            )
+
+            # Research tab always gets data
+            self._trend_tick_counter += 1
+            trend_sample = (self._trend_tick_counter % 20 == 0)  # ~1 sample/sec
+            self._research_tab.update_display(
+                breath_bpm=self._latest_vitals.breath_bpm,
+                heart_bpm=self._latest_vitals.heart_bpm,
+                breath_waveform=self._latest_vitals.breath_waveform,
+                heart_waveform=self._latest_vitals.heart_waveform,
+                quality=q,
+                sample_for_trend=trend_sample,
+            )
+
+            # CSV row accumulation (once per second)
+            if trend_sample and q is not None:
+                phase_range_raw = float(
+                    np.max(self._latest_vitals.breath_waveform)
+                    - np.min(self._latest_vitals.breath_waveform)
+                ) if len(self._latest_vitals.breath_waveform) > 0 else 0.0
+
+                sqi = 0
+                br = q.get("breath_ratio", 0)
+                pr = q.get("phase_range", 0)
+                if pr >= 0.01 and br >= 0.15:
+                    sqi = 3
+                elif pr >= 0.005 and br >= 0.05:
+                    sqi = 2
+                elif pr > 0 or br > 0:
+                    sqi = 1
+
+                self._csv_rows.append({
+                    "Timestamp": datetime.now().isoformat(),
+                    "FrameIndex": self._latest_vitals.frame_index,
+                    "RangeBin": self._pipeline.best_range_bin if self._pipeline.best_range_bin is not None else 0,
+                    "RawPhase": round(phase_range_raw, 6),
+                    "BreathBPM": self._latest_vitals.breath_bpm,
+                    "HeartBPM": self._latest_vitals.heart_bpm,
+                    "PhaseRange": round(q.get("phase_range", 0), 6),
+                    "BreathRatio": round(q.get("breath_ratio", 0), 4),
+                    "HeartProminence": round(q.get("heart_prominence", 0), 4),
+                    "ApneaFlag": 1 if q.get("apnea_state") else 0,
+                    "SQI_Level": sqi,
+                })
+
+            # Status bar — simplified
+            if q and not q.get("valid") and calib_done:
+                self._status_label.setText("● 信号异常")
+                self._status_label.setStyleSheet("color: #e74c3c;")
+            elif self._running:
+                self._status_label.setText("● 监测中")
+                self._status_label.setStyleSheet("color: #27ae60;")
 
         if self._start_time > 0:
             elapsed = time.time() - self._start_time
             if elapsed > 0:
-                self.frame_rate_label.setText(f"帧率: {self._frame_count / elapsed:.1f} fps")
+                self._frame_rate_label.setText(f"帧率: {self._frame_count / elapsed:.1f} fps")
             m, s = divmod(int(elapsed), 60)
-            self.elapsed_label.setText(f"运行: {m:02d}:{s:02d}")
+            self._elapsed_label.setText(f"运行: {m:02d}:{s:02d}")
 
     def closeEvent(self, event) -> None:
         self._on_stop()
