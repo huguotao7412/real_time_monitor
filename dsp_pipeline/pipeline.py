@@ -75,6 +75,19 @@ class Pipeline:
         self._cached_breath_wave: np.ndarray | None = None
         self._cached_heart_wave: np.ndarray | None = None
 
+    @property
+    def calibration_done(self) -> bool:
+        return self._calibration_done
+
+    @property
+    def calibration_progress(self) -> float:
+        """0.0 - 1.0 fraction of calibration samples collected (target 200)."""
+        return min(1.0, len(self._calibration_samples) / 200.0)
+
+    @property
+    def best_range_bin(self) -> int | None:
+        return self._best_bin
+
     def start(self) -> None:
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -339,7 +352,7 @@ class Pipeline:
         return VitalSigns(
             timestamp=time.time(), frame_index=self._frame_count,
             breath_waveform=breath_signal_display, breath_bpm=round(breath_bpm, 1),
-            heart_bpm=round(heart_bpm, 1), heart_waveform=np.array([]),
+            heart_bpm=round(heart_bpm, 1), heart_waveform=heart_signal_display,
             quality=quality,
         )
 
