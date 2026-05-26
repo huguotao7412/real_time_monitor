@@ -156,14 +156,16 @@ class Pipeline:
             # Periodic MUSIC angle update
             if update_angle and not self._angle_initialized:
                 try:
-                    angle, _ = estimate_angle_music(
+                    angle, _, peak_q = estimate_angle_music(
                         rx_matrix, FS_HZ, self._filter.sos_all,
                         num_signals=1,
                     )
-                    self._angle_deg = angle
-                    self._angle_initialized = True
+                    # Only accept angle if MUSIC peak is significant (noise floor ≈ 1.0)
+                    if peak_q > 2.5:
+                        self._angle_deg = angle
+                        self._angle_initialized = True
+                    # else: keep boresight (0°), angle stays uninitialized
                 except Exception:
-                    # MUSIC failed; keep current angle guess
                     pass
 
             # LCMV beamforming (fast enough to run every frame)

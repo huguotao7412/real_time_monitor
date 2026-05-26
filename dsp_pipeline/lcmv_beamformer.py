@@ -83,16 +83,10 @@ def lcmv_displacement(
     # Beamforming: y = w^H X
     beamformed = w_opt.conj() @ X  # [n_snapshots]
 
-    # Phase extraction
+    # Phase extraction → physical displacement (mm)
     raw_phase = np.angle(beamformed)
     unwrapped = np.unwrap(raw_phase)
-
-    # Normalize to [0, 1] (MATLAB rescale)
-    umin = np.min(unwrapped)
-    umax = np.max(unwrapped)
-    if umax - umin > 1e-10:
-        displacement = (unwrapped - umin) / (umax - umin)
-    else:
-        displacement = unwrapped - umin
+    lambda_mm = lambda_m * 1000
+    displacement = (lambda_mm / (4 * np.pi)) * unwrapped
 
     return displacement

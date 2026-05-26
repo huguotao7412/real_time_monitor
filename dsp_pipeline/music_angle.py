@@ -85,8 +85,12 @@ def estimate_angle_music(
     if smax > 0:
         spectrum = spectrum / smax
 
+    # Peak quality: max/mean ratio. Flat noise ≈ 1.0, real target ≫ 1.0.
+    smean = np.mean(spectrum) + np.finfo(float).eps
+    peak_quality = float(smax / smean) if smax > 0 else 1.0
+
     # Find strongest peak in search range
     peak_idx = np.argmax(spectrum)
     angle_deg = float(scan_angles[peak_idx])
 
-    return angle_deg, spectrum
+    return angle_deg, spectrum, peak_quality
