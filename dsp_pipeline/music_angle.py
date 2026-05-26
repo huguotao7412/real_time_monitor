@@ -75,9 +75,10 @@ def estimate_angle_music(
         theta_rad = np.deg2rad(theta)
         # Steering vector
         a = np.exp(-1j * 2 * np.pi * d_spacing * rx_indices * np.sin(theta_rad))
-        a = a.reshape(-1, 1)
-        denominator = a.conj().T @ Q @ a
-        spectrum[i] = 1.0 / (np.abs(denominator) + np.finfo(float).eps)
+        # a'H * Q * a -> scalar (a is [n_channels], result is [1, 1])
+        a_col = a.reshape(-1, 1)
+        denominator = (a_col.conj().T @ Q @ a_col).item()
+        spectrum[i] = 1.0 / (abs(denominator) + np.finfo(float).eps)
 
     # Normalize
     smax = np.max(spectrum)
