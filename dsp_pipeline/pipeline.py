@@ -290,8 +290,8 @@ class Pipeline:
                 self._recovery_count = 0
 
         # BPM 估计
-        breath_bpm = 0.0
-        heart_bpm = 0.0
+        breath_bpm = self._last_valid_breath_bpm
+        heart_bpm = self._last_valid_heart_bpm
         breath_signal_display = breath_signal
         heart_signal_display = heart_signal
 
