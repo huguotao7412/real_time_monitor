@@ -16,3 +16,4 @@ __pycache__/
 # Logs
 logs/
 .claude/
+/docs/

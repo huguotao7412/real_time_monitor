@@ -4,6 +4,8 @@ from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel
 from PyQt6.QtCore import Qt, QRectF, QPropertyAnimation, QEasingCurve, pyqtProperty
 from PyQt6.QtGui import QPainter, QPen, QColor, QFont
 
+from config.i18n import tr, I18n
+
 
 class CalibrationOverlay(QWidget):
     """Semi-transparent overlay with ring progress and countdown text."""
@@ -19,7 +21,7 @@ class CalibrationOverlay(QWidget):
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        self._text = QLabel("正在校准，请保持静止...")
+        self._text = QLabel(tr("calibration_text"))
         self._text.setFont(QFont("Segoe UI", 14))
         self._text.setStyleSheet("color: #bdc3c7; background: transparent;")
         self._text.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -32,6 +34,11 @@ class CalibrationOverlay(QWidget):
         layout.addWidget(self._countdown_label)
 
         self.setVisible(False)
+
+        I18n.instance().language_changed.connect(self.update_ui_texts)
+
+    def update_ui_texts(self, _lang: str = "") -> None:
+        self._text.setText(tr("calibration_text"))
 
     def set_progress(self, fraction: float) -> None:
         """Update ring progress 0.0-1.0 and derived countdown."""

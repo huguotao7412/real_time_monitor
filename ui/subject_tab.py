@@ -5,7 +5,7 @@ import time
 
 import numpy as np
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame
-from PyQt6.QtCore import Qt, QPointF
+from PyQt6.QtCore import Qt, QPointF, QPropertyAnimation, QEasingCurve, pyqtProperty
 from PyQt6.QtGui import QFont, QPainter, QPainterPath, QColor, QBrush
 
 from ui.wave_widget import WaveWidget
@@ -13,6 +13,9 @@ from ui.sqi_indicator import SqiIndicator
 from ui.breathing_petals import BreathingPetals
 from ui.calibration_overlay import CalibrationOverlay
 from ui.status_mapper import map_status_with_movement, BodyMovementDetector
+from config.i18n import tr, I18n
+
+_ERROR_OVERLAY_DELAY = 2.0  # seconds of continuous error before showing calm-down text
 
 
 class SubjectTab(QWidget):
@@ -24,6 +27,7 @@ class SubjectTab(QWidget):
         self._movement_detector = BodyMovementDetector()
         self._sqi_level = 0
         self._calibration_was_done = False
+        self._error_start_time: float | None = None
 
         self._setup_ui()
 
@@ -55,10 +59,10 @@ class SubjectTab(QWidget):
         breath_row.addWidget(self._breath_bpm_label)
         bpm_area.addLayout(breath_row)
 
-        breath_unit = QLabel("呼吸频率 次/分钟")
-        breath_unit.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        breath_unit.setStyleSheet("color: #7f8c8d; font-size: 10pt;")
-        bpm_area.addWidget(breath_unit)
+        self._breath_unit_label = QLabel(tr("breath_rate_unit"))
+        self._breath_unit_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._breath_unit_label.setStyleSheet("color: #7f8c8d; font-size: 10pt;")
+        bpm_area.addWidget(self._breath_unit_label)
 
         bpm_area.addSpacing(20)
 
@@ -74,22 +78,38 @@ class SubjectTab(QWidget):
         heart_row.addWidget(self._heart_bpm_label)
         bpm_area.addLayout(heart_row)
 
-        heart_unit = QLabel("心率 次/分钟")
-        heart_unit.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        heart_unit.setStyleSheet("color: #7f8c8d; font-size: 10pt;")
-        bpm_area.addWidget(heart_unit)
+        self._heart_unit_label = QLabel(tr("heart_rate_unit"))
+        self._heart_unit_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._heart_unit_label.setStyleSheet("color: #7f8c8d; font-size: 10pt;")
+        bpm_area.addWidget(self._heart_unit_label)
 
         bpm_area.addStretch()
         layout.addLayout(bpm_area)
 
-        # Filled waveform (no axes, no grid, no title)
+        # Waveform container (for positioning the overlay)
+        self._wave_container = QWidget()
+        wave_container_layout = QVBoxLayout(self._wave_container)
+        wave_container_layout.setContentsMargins(0, 0, 0, 0)
+
         self._breath_wave = WaveWidget(
             title="", fill_mode=True, show_axes=False, show_grid=False,
         )
-        layout.addWidget(self._breath_wave, stretch=1)
+        wave_container_layout.addWidget(self._breath_wave)
+
+        # Semi-transparent calm-down overlay (hidden by default)
+        self._error_overlay = QLabel(tr("error_overlay_text"), self._wave_container)
+        self._error_overlay.setFont(QFont("Segoe UI", 13))
+        self._error_overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._error_overlay.setStyleSheet(
+            "color: rgba(189, 195, 199, 230);"
+            "background-color: rgba(30, 30, 40, 180);"
+        )
+        self._error_overlay.hide()
+
+        layout.addWidget(self._wave_container, stretch=1)
 
         # Status message
-        self._status_label = QLabel("● 待机")
+        self._status_label = QLabel(tr("status_standby"))
         self._status_label.setFont(QFont("Segoe UI", 11))
         self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._status_label.setStyleSheet("color: #f39c12;")
@@ -105,9 +125,26 @@ class SubjectTab(QWidget):
         line.setStyleSheet("background-color: #3a3a4a;")
         layout.addWidget(line)
 
+        # i18n hot-switch
+        I18n.instance().language_changed.connect(self.update_ui_texts)
+
+    def update_ui_texts(self, _lang: str = "") -> None:
+        self._breath_unit_label.setText(tr("breath_rate_unit"))
+        self._heart_unit_label.setText(tr("heart_rate_unit"))
+        self._error_overlay.setText(tr("error_overlay_text"))
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._calibration_overlay.setGeometry(self.rect())
+        # Keep error overlay centered within the wave container
+        if self._wave_container.isVisible():
+            cw = self._wave_container.width()
+            ch = self._wave_container.height()
+            ow = min(400, cw - 40)
+            oh = 44
+            self._error_overlay.setGeometry(
+                (cw - ow) // 2, (ch - oh) // 2, ow, oh,
+            )
 
     def update_display(
         self,
@@ -145,6 +182,19 @@ class SubjectTab(QWidget):
         movement = self._movement_detector.feed(phase_range)
         msg, level = map_status_with_movement(quality, movement)
 
+        # ── Waveform visual degradation ──
+        self._breath_wave.set_state(level)
+
+        # Error overlay: show after sustained error
+        if level == "error":
+            if self._error_start_time is None:
+                self._error_start_time = now
+            elif now - self._error_start_time >= _ERROR_OVERLAY_DELAY:
+                self._error_overlay.show()
+        else:
+            self._error_start_time = None
+            self._error_overlay.hide()
+
         # BPM opacity
         bpm_opacity = 0.4 if level == "error" else 1.0
 
@@ -174,7 +224,7 @@ class SubjectTab(QWidget):
             f"{heart_color.blue()}, {int(bpm_opacity * 255)});"
         )
 
-        # Waveform
+        # Waveform data (decay is applied inside WaveWidget)
         if len(breath_waveform) > 0:
             self._breath_wave.set_data(breath_waveform)
 
@@ -191,25 +241,61 @@ class SubjectTab(QWidget):
 
 
 class HeartBeatIcon(QWidget):
-    """Bezier heart shape that pulses at heart_bpm frequency."""
+    """Bezier heart shape that pulses at heart_bpm frequency.
+
+    Uses QPropertyAnimation on scale_factor, driven by Qt's native C++
+    animation loop — no manual phase integration in Python paintEvent.
+    """
 
     def __init__(self, size: int = 50, parent=None):
         super().__init__(parent)
         self._size = size
-        self._phase = 0.0
         self._heart_bpm = 0.0
-        self._scale = 1.0
+        self._scale_factor = 1.0
         self._current_color = QColor(39, 174, 96)
+
+        # Heartbeat animation: quick contraction + elastic recoil
+        self._anim = QPropertyAnimation(self, b"scale_factor")
+        self._anim.setLoopCount(-1)  # infinite — stopped when BPM drops to 0
+        # Keyframes: rest → peak (systole) → recoil → rest
+        self._anim.setKeyValueAt(0.0, 1.0)
+        self._anim.setKeyValueAt(0.12, 1.28)
+        self._anim.setKeyValueAt(0.30, 1.0)
+        self._anim.setKeyValueAt(1.0, 1.0)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutElastic)
+
         self.setFixedSize(size, size)
 
-    def set_heart_bpm(self, bpm: float, dt: float) -> None:
-        if bpm > 0:
-            self._heart_bpm = bpm
-            self._phase += bpm / 60.0 * 2 * math.pi * dt
-        beat = 0.5 + 0.5 * math.sin(self._phase)
-        self._scale = 1.0 + 0.3 * max(0, beat ** 8)
-        self._current_color = _heart_rate_color(bpm)
+    # ── pyqtProperty for QPropertyAnimation ──────────────────
+
+    def get_scale_factor(self) -> float:
+        return self._scale_factor
+
+    def set_scale_factor(self, val: float) -> None:
+        self._scale_factor = val
         self.update()
+
+    scale_factor = pyqtProperty(float, get_scale_factor, set_scale_factor)
+
+    # ── public API ──────────────────────────────────────────
+
+    def set_heart_bpm(self, bpm: float, dt: float) -> None:
+        """Update animation period from BPM. dt kept for API compatibility."""
+        if bpm > 0:
+            if bpm != self._heart_bpm:
+                self._heart_bpm = bpm
+                period_ms = int(60000.0 / bpm)
+                self._anim.setDuration(period_ms)
+                if self._anim.state() != QPropertyAnimation.State.Running:
+                    self._anim.start()
+        else:
+            self._heart_bpm = 0.0
+            if self._anim.state() == QPropertyAnimation.State.Running:
+                self._anim.stop()
+            self._scale_factor = 1.0
+            self.update()
+
+        self._current_color = _heart_rate_color(bpm)
 
     def current_color(self) -> QColor:
         return self._current_color
@@ -220,7 +306,7 @@ class HeartBeatIcon(QWidget):
 
         cx, cy = self._size / 2, self._size / 2
         painter.translate(cx, cy)
-        painter.scale(self._scale, self._scale)
+        painter.scale(self._scale_factor, self._scale_factor)
         painter.translate(-cx, -cy)
 
         s = self._size * 0.35

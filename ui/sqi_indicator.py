@@ -3,6 +3,8 @@
 from PyQt6.QtWidgets import QWidget, QHBoxLayout, QLabel
 from PyQt6.QtGui import QFont
 
+from config.i18n import tr, I18n
+
 
 class SqiIndicator(QWidget):
     """Signal quality indicator with 3 colored bars and a label."""
@@ -14,11 +16,11 @@ class SqiIndicator(QWidget):
         0: "#7f8c8d",  # no signal
     }
 
-    LABELS = {
-        3: "信号: 优",
-        2: "信号: 中",
-        1: "信号: 差",
-        0: "信号: --",
+    LABEL_KEYS = {
+        3: "sqi_excellent",
+        2: "sqi_good",
+        1: "sqi_poor",
+        0: "sqi_none",
     }
 
     def __init__(self, parent=None):
@@ -35,12 +37,20 @@ class SqiIndicator(QWidget):
             layout.addWidget(bar)
             self._bars.append(bar)
 
-        self._label = QLabel(self.LABELS[0])
+        self._label = QLabel(tr(self.LABEL_KEYS[0]))
         self._label.setFont(QFont("Segoe UI", 9))
         self._label.setStyleSheet("color: #95a5a6;")
         layout.addWidget(self._label)
 
         layout.addStretch()
+
+        I18n.instance().language_changed.connect(self.update_ui_texts)
+
+    def update_ui_texts(self, _lang: str = "") -> None:
+        for level in self.LABEL_KEYS:
+            if hasattr(self, "_last_level") and level == self._last_level:
+                self._label.setText(tr(self.LABEL_KEYS[level]))
+                break
 
     def set_level(self, breath_ratio: float, phase_range: float) -> int:
         """Update from quality metrics. Returns level 0-3."""
@@ -53,6 +63,8 @@ class SqiIndicator(QWidget):
         else:
             level = 0
 
+        self._last_level = level
+
         color = self.COLORS[level]
         for i, bar in enumerate(self._bars):
             if i < level:
@@ -60,6 +72,6 @@ class SqiIndicator(QWidget):
             else:
                 bar.setStyleSheet("background-color: #7f8c8d; border-radius: 1px;")
 
-        self._label.setText(self.LABELS[level])
+        self._label.setText(tr(self.LABEL_KEYS[level]))
         self._label.setStyleSheet(f"color: {color};")
         return level

@@ -11,6 +11,7 @@ from PyQt6.QtGui import QFont
 from ui.wave_widget import WaveWidget
 from ui.sqi_indicator import SqiIndicator
 from ui.trend_panel import TrendPanel
+from config.i18n import tr, I18n
 
 
 class ResearchTab(QWidget):
@@ -28,8 +29,8 @@ class ResearchTab(QWidget):
 
         # Waveforms
         wave_splitter = QSplitter(Qt.Orientation.Horizontal)
-        self._breath_wave = WaveWidget("呼吸波形 (0.1-0.6 Hz)", "Amplitude")
-        self._heart_wave = WaveWidget("心率波形 (0.8-2.5 Hz)", "Amplitude")
+        self._breath_wave = WaveWidget(tr("resp_wave_title"), "Amplitude")
+        self._heart_wave = WaveWidget(tr("heart_wave_title"), "Amplitude")
         wave_splitter.addWidget(self._breath_wave)
         wave_splitter.addWidget(self._heart_wave)
         layout.addWidget(wave_splitter, stretch=3)
@@ -42,7 +43,8 @@ class ResearchTab(QWidget):
         self._breath_bpm_label.setFont(bpm_font)
         self._breath_bpm_label.setStyleSheet("color: #27ae60;")
         self._breath_bpm_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        bpm_row.addWidget(QLabel("呼吸:"))
+        self._breath_label = QLabel(tr("label_breath"))
+        bpm_row.addWidget(self._breath_label)
         bpm_row.addWidget(self._breath_bpm_label)
 
         bpm_row.addSpacing(30)
@@ -51,7 +53,8 @@ class ResearchTab(QWidget):
         self._heart_bpm_label.setFont(bpm_font)
         self._heart_bpm_label.setStyleSheet("color: #e74c3c;")
         self._heart_bpm_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        bpm_row.addWidget(QLabel("心率:"))
+        self._heart_label = QLabel(tr("label_heart"))
+        bpm_row.addWidget(self._heart_label)
         bpm_row.addWidget(self._heart_bpm_label)
 
         bpm_row.addStretch()
@@ -65,7 +68,7 @@ class ResearchTab(QWidget):
 
         # Debug panel (collapsible)
         debug_header = QHBoxLayout()
-        self._debug_toggle = QPushButton("▼ 调试面板")
+        self._debug_toggle = QPushButton(tr("debug_collapsed"))
         self._debug_toggle.setStyleSheet(
             "QPushButton { background: #3a3a4a; color: #bdc3c7; border: none; "
             "padding: 6px 12px; text-align: left; }"
@@ -92,10 +95,23 @@ class ResearchTab(QWidget):
         line.setStyleSheet("background-color: #3a3a4a;")
         layout.addWidget(line)
 
+        I18n.instance().language_changed.connect(self.update_ui_texts)
+
+    def update_ui_texts(self, _lang: str = "") -> None:
+        self._breath_wave.title_label.setText(tr("resp_wave_title"))
+        self._heart_wave.title_label.setText(tr("heart_wave_title"))
+        self._breath_label.setText(tr("label_breath"))
+        self._heart_label.setText(tr("label_heart"))
+        self._debug_toggle.setText(
+            tr("debug_expanded") if self._debug_expanded else tr("debug_collapsed")
+        )
+
     def _toggle_debug(self) -> None:
         self._debug_expanded = not self._debug_expanded
         self._debug_panel.setVisible(self._debug_expanded)
-        self._debug_toggle.setText("▲ 调试面板" if self._debug_expanded else "▼ 调试面板")
+        self._debug_toggle.setText(
+            tr("debug_expanded") if self._debug_expanded else tr("debug_collapsed")
+        )
 
     def start(self) -> None:
         self._trend.start()

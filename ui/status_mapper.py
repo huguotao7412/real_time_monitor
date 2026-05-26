@@ -1,31 +1,42 @@
-"""Map DSP quality dict conditions to human-readable Chinese status messages."""
+"""Map DSP quality dict conditions to human-readable status messages (i18n-aware)."""
 
 from collections import deque
 from typing import Any
 
 import numpy as np
 
+from config.i18n import tr
+
 
 def map_status(quality: dict[str, Any] | None) -> tuple[str, str]:
     """Return (message: str, level: str) where level is 'normal'|'warning'|'error'.
 
     Priority order: apnea > phase_range > breath_ratio. First match wins.
+    Error level is reserved for conditions severe enough to trigger waveform
+    visual degradation (amplitude decay + color desaturation).
     """
     if quality is None:
-        return ("● 待机", "normal")
+        return (tr("status_standby"), "normal")
 
     if quality.get("apnea_state"):
-        return ("呼吸较浅，请放松", "warning")
+        return (tr("msg_apnea"), "warning")
 
     phase_range = quality.get("phase_range", 0.0)
     breath_ratio = quality.get("breath_ratio", 0.0)
 
-    if phase_range < 0.005:
-        return ("未检测到微动，请确认在雷达覆盖范围内 (0.5m-1.5m)", "warning")
-    if breath_ratio < 0.03:
-        return ("信号较弱，请调整坐姿，正对雷达", "warning")
+    # Error thresholds: signal too weak to produce meaningful waveform
+    if phase_range < 0.002:
+        return (tr("msg_signal_extreme_weak"), "error")
+    if breath_ratio < 0.01:
+        return (tr("msg_signal_severe_degraded"), "error")
 
-    return ("● 监测中", "normal")
+    # Warning thresholds: degraded but still usable
+    if phase_range < 0.005:
+        return (tr("msg_no_micro_motion"), "warning")
+    if breath_ratio < 0.03:
+        return (tr("msg_signal_weak"), "warning")
+
+    return (tr("status_monitoring"), "normal")
 
 
 class BodyMovementDetector:
@@ -53,5 +64,5 @@ def map_status_with_movement(
 ) -> tuple[str, str]:
     """Like map_status but with body movement detection layered in."""
     if movement_detected:
-        return ("检测到体动干扰，请保持放松", "warning")
+        return (tr("msg_body_movement"), "warning")
     return map_status(quality)
