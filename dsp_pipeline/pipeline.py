@@ -16,19 +16,34 @@ from dsp_pipeline.range_bin import find_best_range_bin
 from dsp_pipeline.phase import extract_phase, unwrap_phase
 from dsp_pipeline.filters import remove_dc, VitalSignFilter
 from dsp_pipeline.fft_bpm import estimate_bpm, kalman_smooth, estimate_breath_bpm_time_domain
+from dsp_pipeline.music_angle import estimate_angle_music
+from dsp_pipeline.lcmv_beamformer import lcmv_displacement
 
 
 class Pipeline:
-    def __init__(self):
+    def __init__(self, use_beamforming: bool = True):
         self.raw_queue = queue.Queue(maxsize=RAW_QUEUE_MAXSIZE)
         self.display_queue = queue.Queue(maxsize=DISPLAY_QUEUE_MAXSIZE)
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._frame_count = 0
+
+        # Per-RX complex buffer (replaces scalar _phase_buffer for beamforming)
+        self._rx_buffer: deque[np.ndarray] = deque(maxlen=WINDOW_SIZE)
+        # Scalar phase buffer kept as fallback
         self._phase_buffer: deque[float] = deque(maxlen=WINDOW_SIZE)
+
         self._best_bin: int | None = None
         self._last_bpm_update = 0
         self.last_heartbeat = 0.0
+
+        # Feature toggle
+        self._use_beamforming = use_beamforming
+
+        # Beamforming state
+        self._angle_deg: float = 0.0  # initial guess: boresight
+        self._angle_initialized: bool = False
+        self._beamforming_ok: bool = True  # set False on failure -> fallback
 
         # MATLAB Filter.m: SOS 滤波器组
         self._filter = VitalSignFilter(fs=FS_HZ)
@@ -75,6 +90,18 @@ class Pipeline:
             except Exception as e:
                 print(f"[DSP] Error: {e}")
 
+    def _extract_rx_complex(self, data_cube: np.ndarray) -> np.ndarray:
+        """Extract per-RX complex IQ at target range bin with +/-2 bin averaging.
+
+        Matches MATLAB calculateMusicSpectrum range bin smoothing.
+        Returns shape [rx_antennas] complex array.
+        """
+        n_range = data_cube.shape[0]
+        start_bin = max(1, self._best_bin - 2)
+        end_bin = min(n_range - 1, self._best_bin + 2)
+        rx_slice = data_cube[start_bin:end_bin + 1, 0, :]  # [n_bins, rx]
+        return np.mean(rx_slice, axis=0)  # [rx]
+
     def _process_frame(self, frame: RadarFrame) -> VitalSigns | None:
         data_cube = frame.data_cube
 
@@ -84,7 +111,15 @@ class Pipeline:
         if self._best_bin is None:
             return None
 
-        # 2. 相位提取
+        # 2. Extract per-RX complex data and buffer
+        rx_complex = None
+        try:
+            rx_complex = self._extract_rx_complex(data_cube)
+            self._rx_buffer.append(rx_complex)
+        except (IndexError, ValueError):
+            pass
+
+        # 3. Fallback: simple scalar phase (always buffered)
         phase = extract_phase(data_cube, self._best_bin)
         self._phase_buffer.append(phase)
         self._frame_count += 1
@@ -92,26 +127,76 @@ class Pipeline:
         if len(self._phase_buffer) < WINDOW_SIZE:
             return None
 
+        # 4. Choose signal path
+        should_update_bpm = (
+            self._frame_count - self._last_bpm_update >= BPM_UPDATE_INTERVAL
+        )
+
+        if self._use_beamforming and self._beamforming_ok and rx_complex is not None:
+            displacement = self._beamforming_path(should_update_bpm)
+        else:
+            displacement = self._fallback_phase_path()
+
+        # 5. Shared downstream: detrend -> diff -> SOS -> BPM -> quality
+        return self._shared_signal_chain(displacement, should_update_bpm)
+
+    def _beamforming_path(self, update_angle: bool) -> np.ndarray | None:
+        """Run MUSIC + LCMV on the RX buffer. Returns displacement [200] or None."""
+        try:
+            rx_matrix = np.array(self._rx_buffer)  # [200, rx]
+
+            # Periodic MUSIC angle update
+            if update_angle and not self._angle_initialized:
+                try:
+                    angle, _ = estimate_angle_music(
+                        rx_matrix, FS_HZ, self._filter.sos_all,
+                        num_signals=1,
+                    )
+                    self._angle_deg = angle
+                    self._angle_initialized = True
+                except Exception:
+                    # MUSIC failed; keep current angle guess
+                    pass
+
+            # LCMV beamforming (fast enough to run every frame)
+            displacement = lcmv_displacement(rx_matrix, self._angle_deg)
+            return displacement
+
+        except Exception:
+            self._beamforming_ok = False
+            return self._fallback_phase_path()
+
+    def _fallback_phase_path(self) -> np.ndarray:
+        """Existing simple phase path: unwrap -> detrend.
+
+        Returns displacement-like array for downstream compatibility.
+        """
         phase_arr = np.array(self._phase_buffer)
-
-        # 3. 解缠 + 去直流
         unwrapped = unwrap_phase(phase_arr)
-        no_dc = remove_dc(unwrapped)
+        return remove_dc(unwrapped)
 
-        # 4. 一阶差分增强 (MATLAB PhaseProcess.m: diff)
+    def _shared_signal_chain(
+        self, displacement: np.ndarray | None, update_bpm: bool
+    ) -> VitalSigns | None:
+        """Common signal processing chain: diff -> SOS -> apnea -> BPM -> quality."""
+        if displacement is None:
+            return None
+
+        # 一阶差分增强 (MATLAB PhaseProcess.m: diff)
+        no_dc = remove_dc(displacement)
         enhanced = np.diff(no_dc, prepend=no_dc[0])
 
-        # 5. SOS 带通滤波 (MATLAB Filter.m)
+        # SOS 带通滤波 (MATLAB Filter.m)
         breath_signal = self._filter.filter_breath(enhanced)
         heart_signal = self._filter.filter_heart(enhanced)
 
-        # 6. 计算信号能量指标
+        # 信号能量指标
         phase_range = float(np.max(enhanced) - np.min(enhanced))
         breath_energy = float(np.var(breath_signal))
         total_energy = float(np.var(enhanced)) + 1e-10
         breath_power_ratio = breath_energy / total_energy
 
-        # 7. 自动校准 (系统启动后在前200个完整窗口中收集 phase_range 样本)
+        # 自动校准
         if not self._calibration_done and len(self._phase_buffer) >= WINDOW_SIZE:
             self._calibration_samples.append(phase_range)
             if len(self._calibration_samples) >= 200:
@@ -121,10 +206,7 @@ class Pipeline:
                 self._apnea_threshold = max(0.001, mean_val - 2 * std_val)
                 self._calibration_done = True
 
-        # 8. 屏息状态机 (双重触发: 能量极低 或 phase_range 过低)
-        # breath_power_ratio < 0.15: 呼吸频带能量占比极低, 无需校准即可触发
-        # phase_range < 0.005: 绝对下限保护, 始终生效
-        # phase_range < calibrated_threshold: 校准后自适应阈值
+        # 屏息状态机
         in_low_signal = (
             breath_power_ratio < 0.15
             or phase_range < 0.005
@@ -133,46 +215,20 @@ class Pipeline:
             in_low_signal = in_low_signal or (phase_range < self._apnea_threshold)
 
         if in_low_signal:
-            if not self._in_apnea:
-                self._in_apnea = True
-                self._apnea_start_time = time.time()
-                self._apnea_hold_breath = self._last_valid_breath_bpm
-                self._apnea_hold_heart = self._last_valid_heart_bpm
-            elapsed = time.time() - self._apnea_start_time
-            if elapsed < 4.0:
-                decay = 1.0 - (elapsed / 4.0)
-                breath_bpm = self._apnea_hold_breath * decay
-                heart_bpm = self._apnea_hold_heart * decay
-            else:
-                breath_bpm = 0.0
-                heart_bpm = 0.0
-            self._recovery_count = 0
-            self.last_heartbeat = time.time()
-            return VitalSigns(
-                timestamp=time.time(), frame_index=frame.frame_index,
-                breath_waveform=breath_signal, breath_bpm=round(breath_bpm, 1),
-                heart_bpm=round(heart_bpm, 1), heart_waveform=np.array([]),
-                quality={
-                    "valid": True, "reason": "apnea", "phase_range": phase_range,
-                    "apnea_state": True, "harmonic_overlap": False,
-                    "heart_prominence": 0.0, "breath_ratio": breath_power_ratio,
-                },
-            )
+            return self._handle_apnea(breath_signal, phase_range, breath_power_ratio)
         elif self._in_apnea:
             self._recovery_count += 1
             if self._recovery_count >= 3:
                 self._in_apnea = False
                 self._recovery_count = 0
 
-        # 9. BPM 估计
+        # BPM 估计
         breath_bpm = 0.0
         heart_bpm = 0.0
-        if self._frame_count - self._last_bpm_update >= BPM_UPDATE_INTERVAL:
-            # 呼吸: 时域峰值检测 (min_interval=1.5s -> 上限 40 BPM)
+        if update_bpm:
             breath_bpm = estimate_breath_bpm_time_domain(
                 breath_signal, fs=FS_HZ, min_interval_sec=1.5
             )
-            # 时域检测失败时, 回退到 FFT (确保 f0 有效, 谐波掩码能工作)
             if breath_bpm <= 0:
                 breath_bpm, _ = estimate_bpm(
                     breath_signal, FS_HZ, (0.1, 0.8), n_fft=1024
@@ -184,7 +240,6 @@ class Pipeline:
                     self._breath_history = self._breath_history[-15:]
                 breath_bpm = kalman_smooth(self._breath_history, q=5e-3, r=0.3)
 
-            # 心率: FFT + 谐波掩码 + 自适应 Kalman
             f0 = breath_bpm / 60.0 if breath_bpm > 0 else 0.0
             heart_bpm_raw, prominence = estimate_bpm(
                 heart_signal, FS_HZ, (0.8, 2.5), f0=f0
@@ -204,15 +259,43 @@ class Pipeline:
 
             self._last_bpm_update = self._frame_count
 
-        # 10. 质量评估
         quality = self._check_quality(enhanced)
+        self.last_heartbeat = time.time()
 
+        return VitalSigns(
+            timestamp=time.time(), frame_index=self._frame_count,
+            breath_waveform=breath_signal, breath_bpm=round(breath_bpm, 1),
+            heart_bpm=round(heart_bpm, 1), heart_waveform=np.array([]),
+            quality=quality,
+        )
+
+    def _handle_apnea(
+        self, breath_signal: np.ndarray, phase_range: float, breath_power_ratio: float
+    ) -> VitalSigns:
+        if not self._in_apnea:
+            self._in_apnea = True
+            self._apnea_start_time = time.time()
+            self._apnea_hold_breath = self._last_valid_breath_bpm
+            self._apnea_hold_heart = self._last_valid_heart_bpm
+        elapsed = time.time() - self._apnea_start_time
+        if elapsed < 4.0:
+            decay = 1.0 - (elapsed / 4.0)
+            breath_bpm = self._apnea_hold_breath * decay
+            heart_bpm = self._apnea_hold_heart * decay
+        else:
+            breath_bpm = 0.0
+            heart_bpm = 0.0
+        self._recovery_count = 0
         self.last_heartbeat = time.time()
         return VitalSigns(
-            timestamp=time.time(), frame_index=frame.frame_index,
-            breath_waveform=breath_signal, breath_bpm=breath_bpm,
-            heart_bpm=heart_bpm, heart_waveform=np.array([]),
-            quality=quality,
+            timestamp=time.time(), frame_index=0,
+            breath_waveform=breath_signal, breath_bpm=round(breath_bpm, 1),
+            heart_bpm=round(heart_bpm, 1), heart_waveform=np.array([]),
+            quality={
+                "valid": True, "reason": "apnea", "phase_range": phase_range,
+                "apnea_state": True, "harmonic_overlap": False,
+                "heart_prominence": 0.0, "breath_ratio": breath_power_ratio,
+            },
         )
 
     def _check_quality(self, signal: np.ndarray) -> dict:
