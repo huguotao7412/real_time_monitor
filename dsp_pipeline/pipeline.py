@@ -274,7 +274,7 @@ class Pipeline:
                 self._apnea_threshold = max(0.001, mean_val - 2 * std_val)
                 self._calibration_done = True
 
-        # 屏息状态机: 需连续 50 帧 (2.5s @20fps) 低信号才触发
+        # 屏息状态机: 需连续 25 帧 (1.25s @20fps) 低信号才触发
         in_low_signal = (
             breath_power_ratio < 0.15
             or phase_range < 0.005
@@ -289,7 +289,7 @@ class Pipeline:
             if self._in_apnea:
                 self._in_apnea = False  # 1 帧正常即恢复
 
-        if self._low_signal_frame_count >= 50 and not self._in_apnea:
+        if self._low_signal_frame_count >= 25 and not self._in_apnea:
             self._in_apnea = True
             self._apnea_start_time = time.time()
         elif self._in_apnea:
