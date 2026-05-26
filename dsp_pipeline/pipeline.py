@@ -374,7 +374,7 @@ class Pipeline:
         return VitalSigns(
             timestamp=time.time(), frame_index=self._frame_count,
             breath_waveform=breath_signal,
-            breath_bpm=round(self._last_valid_breath_bpm, 1),
+            breath_bpm=0.0,  # 屏息时呼吸停止，数值归零
             heart_bpm=round(self._last_valid_heart_bpm, 1),
             heart_waveform=np.array([]),
             quality={
