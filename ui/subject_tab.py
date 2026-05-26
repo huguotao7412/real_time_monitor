@@ -146,7 +146,7 @@ class SubjectTab(QWidget):
         msg, level = map_status_with_movement(quality, movement)
 
         # BPM opacity
-        bpm_opacity = 0.4 if level == "error" or self._sqi_level <= 1 else 1.0
+        bpm_opacity = 0.4 if level == "error" else 1.0
 
         # Breath BPM + petals
         if breath_bpm > 0:
