@@ -1,0 +1,29 @@
+<h2>受试者模式（Subject Mode）布局方案</h2>
+<p class="subtitle">这是被测人员实际看到的界面。核心原则：极简、安心、不引起紧张。请选择布局方案。</p>
+
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>居中聚焦式</h3>
+      <p>所有元素垂直居中。顶部：SQI 信号灯。中间：大字 BPM（呼吸+心率上下排列），心率数字旁红心脉动动画。底部：单路填充式呼吸波形（隐藏坐标轴和网格）。<strong>类似 Apple Watch 呼吸 app 的极简感。</strong></p>
+      <p style="color: #888; font-size: 0.9em;">最干净、最放松，但信息密度最低</p>
+    </div>
+  </div>
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>左右分栏式</h3>
+      <p>左侧：大字 BPM 数值 + SQI 信号灯 + 呼吸脉动圈。右侧：呼吸波形 + 心率波形上下堆叠（填充式、无坐标轴）。<strong>数值和波形兼顾，一屏看完。</strong></p>
+      <p style="color: #888; font-size: 0.9em;">信息完整但不过载，适合大多数场景</p>
+    </div>
+  </div>
+  <div class="option" data-choice="c" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>波形为主体式</h3>
+      <p>呼吸波形占据 70% 面积（大画布填充式），BPM 数字叠加在波形左上角半透明显示。心率波形在下方较小区域。<strong>强调波形的"生命感"，数值为辅助。</strong></p>
+      <p style="color: #888; font-size: 0.9em;">视觉冲击力最强，但 BPM 不够突出</p>
+    </div>
+  </div>
+</div>

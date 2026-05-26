@@ -1,9 +1,6 @@
 # Manuals and reference docs
 *.pdf
 
-# Data files
-data/
-
 # Algorithm reference (MATLAB)
 algorithm/
 
