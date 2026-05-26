@@ -305,6 +305,10 @@ class Pipeline:
                     heart_signal_display = adv_heart
                     breath_bpm = adv_breath_bpm
                     heart_bpm = adv_heart_bpm
+                    if breath_bpm > 0:
+                        self._last_valid_breath_bpm = breath_bpm
+                    if heart_bpm > 0:
+                        self._last_valid_heart_bpm = heart_bpm
                     self._cached_breath_wave = adv_breath
                     self._cached_heart_wave = adv_heart
                 except Exception:
