@@ -88,6 +88,10 @@ def estimate_breath_bpm_time_domain(
     t = np.arange(n)
     detrended = signal - np.polyval(np.polyfit(t, signal, 1), t)
 
+    # 如果波形的整体波动不到 0.005 弧度（纯属底噪环境），直接判为无呼吸
+    if np.max(detrended) - np.min(detrended) < 0.005:
+        return 0.0
+
     # 振幅检查: 无显著波动 → 屏息/无目标, 返回 0
     envelope = np.abs(detrended)
     # 将信号分成前后两半，比较振幅: 真人呼吸时振幅有变化

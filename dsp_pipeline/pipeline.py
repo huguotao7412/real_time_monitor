@@ -244,17 +244,17 @@ class Pipeline:
         return breath_wave, heart_wave, breath_bpm, heart_bpm
 
     def _shared_signal_chain(
-        self, displacement: np.ndarray | None, update_bpm: bool
+            self, displacement: np.ndarray | None, update_bpm: bool
     ) -> VitalSigns | None:
         """Common signal processing chain: diff -> SOS -> apnea -> BPM -> quality."""
         if displacement is None:
             return None
 
-        # 一阶差分增强 (MATLAB PhaseProcess.m: diff)
+        # 一阶差分增强
         no_dc = remove_dc(displacement)
         enhanced = np.diff(no_dc, prepend=no_dc[0])
 
-        # SOS 带通滤波 (MATLAB Filter.m)
+        # SOS 带通滤波
         breath_signal = self._filter.filter_breath(enhanced)
         heart_signal = self._filter.filter_heart(enhanced)
 
@@ -264,36 +264,43 @@ class Pipeline:
         total_energy = float(np.var(enhanced)) + 1e-10
         breath_power_ratio = breath_energy / total_energy
 
-        # 自动校准
+        # 提取最近 30 帧 (1.5秒) 短时能量，避免 10 秒窗口导致的响应迟钝
+        recent_frames = 30
+        if len(enhanced) >= recent_frames:
+            recent_enhanced = enhanced[-recent_frames:]
+            recent_phase_range = float(np.max(recent_enhanced) - np.min(recent_enhanced))
+        else:
+            recent_phase_range = phase_range
+
+        # 自动校准屏息阈值
         if not self._calibration_done and len(self._phase_buffer) >= WINDOW_SIZE:
-            self._calibration_samples.append(phase_range)
+            self._calibration_samples.append(recent_phase_range)
             if len(self._calibration_samples) >= 200:
                 arr = np.array(self._calibration_samples)
                 mean_val = float(np.mean(arr))
-                std_val = float(np.std(arr))
-                self._apnea_threshold = max(0.001, mean_val - 2 * std_val)
+                self._apnea_threshold = max(0.005, mean_val * 0.25)
                 self._calibration_done = True
 
-        # 屏息状态机: 需连续 25 帧 (1.25s @20fps) 低信号才触发
-        in_low_signal = (
-            breath_power_ratio < 0.15
-            or phase_range < 0.005
-        )
+        # 屏息状态机：使用短时能量 recent_phase_range 进行判断
+        in_low_signal = (recent_phase_range < 0.005)
         if self._calibration_done:
-            in_low_signal = in_low_signal or (phase_range < self._apnea_threshold)
+            in_low_signal = in_low_signal or (recent_phase_range < self._apnea_threshold)
 
         if in_low_signal:
             self._low_signal_frame_count += 1
         else:
             self._low_signal_frame_count = 0
             if self._in_apnea:
-                self._in_apnea = False  # 1 帧正常即恢复
+                self._in_apnea = False
+                self._breath_history.clear()  # 恢复呼吸时清空历史，避免滞后
 
-        if self._low_signal_frame_count >= 25 and not self._in_apnea:
+        # 连续 15 帧 (0.75秒) 平缓即触发屏息
+        if self._low_signal_frame_count >= 15 and not self._in_apnea:
             self._in_apnea = True
             self._apnea_start_time = time.time()
-        elif self._in_apnea:
-            return self._handle_apnea(breath_signal, phase_range, breath_power_ratio)
+            self._breath_history.clear()  # 刚进入屏息时清空历史
+
+        # ⚠️ 注意：这里不要提前 return！让程序继续往下走，去计算真实的心率
 
         # BPM 估计
         breath_bpm = self._last_valid_breath_bpm
@@ -303,7 +310,6 @@ class Pipeline:
 
         if update_bpm:
             if self._use_advanced_dsp:
-                # Step 2: EMD -> WPD -> STFT (full replacement of SOS+BPM)
                 try:
                     adv_breath, adv_heart, adv_breath_bpm, adv_heart_bpm = \
                         self._advanced_dsp_path(displacement)
@@ -318,11 +324,9 @@ class Pipeline:
                     self._cached_breath_wave = adv_breath
                     self._cached_heart_wave = adv_heart
                 except Exception:
-                    # Fall through to legacy path
                     self._use_advanced_dsp = False
 
             if not self._use_advanced_dsp or breath_bpm <= 0:
-                # Legacy SOS + FFT path (also serves as fallback)
                 breath_bpm = estimate_breath_bpm_time_domain(
                     breath_signal, fs=FS_HZ, min_interval_sec=1.5
                 )
@@ -357,31 +361,29 @@ class Pipeline:
             self._last_bpm_update = self._frame_count
 
         quality = self._check_quality(enhanced)
+
+        # ⚠️ 【最核心的修改】：在最终打包输出前拦截！
+        # 如果判定为屏息，强制将呼吸率 (breath_bpm) 设为 0。
+        # 但是！完全保留刚刚算出来的真实心率 (heart_bpm) 以及真实的心率波形！
+        if self._in_apnea:
+            breath_bpm = 0.0
+            quality["apnea_state"] = True
+            quality["reason"] = "apnea"
+        else:
+            quality["apnea_state"] = False
+
+        quality["phase_range"] = phase_range
+        quality["breath_ratio"] = breath_power_ratio
+
         self.last_heartbeat = time.time()
 
         return VitalSigns(
             timestamp=time.time(), frame_index=self._frame_count,
-            breath_waveform=breath_signal_display, breath_bpm=round(breath_bpm, 1),
-            heart_bpm=round(heart_bpm, 1), heart_waveform=heart_signal_display,
+            breath_waveform=breath_signal_display,
+            breath_bpm=round(breath_bpm, 1),
+            heart_bpm=round(heart_bpm, 1),  # 屏息时，心率依旧输出真实计算值
+            heart_waveform=heart_signal_display,  # 屏息时，依然输出心跳波形
             quality=quality,
-        )
-
-    def _handle_apnea(
-        self, breath_signal: np.ndarray, phase_range: float, breath_power_ratio: float
-    ) -> VitalSigns:
-        self._recovery_count = 0
-        self.last_heartbeat = time.time()
-        return VitalSigns(
-            timestamp=time.time(), frame_index=self._frame_count,
-            breath_waveform=breath_signal,
-            breath_bpm=0.0,  # 屏息时呼吸停止，数值归零
-            heart_bpm=round(self._last_valid_heart_bpm, 1),
-            heart_waveform=np.array([]),
-            quality={
-                "valid": True, "reason": "apnea", "phase_range": phase_range,
-                "apnea_state": True, "harmonic_overlap": False,
-                "heart_prominence": 0.0, "breath_ratio": breath_power_ratio,
-            },
         )
 
     def _check_quality(self, signal: np.ndarray) -> dict:
