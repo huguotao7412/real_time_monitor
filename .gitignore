@@ -17,3 +17,4 @@ __pycache__/
 logs/
 .claude/
 /docs/
+/bp_matlab/

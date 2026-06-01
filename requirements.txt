@@ -7,3 +7,5 @@ EMD-signal>=1.6
 PyWavelets>=1.5
 h5py>=3.10
 pyedflib>=0.1.36
+torch>=2.0.0
+PyEMD>=1.0

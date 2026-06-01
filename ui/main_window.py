@@ -38,14 +38,17 @@ class MainWindow(QMainWindow):
         self.resize(1200, 800)
 
         self._mode = mode
+        self._bp_mode = False  # Start in HR mode, toggle button switches
         self._replay_file = replay_file
         self._bin_reader: BinFileReader | None = None
         self._pipeline: Pipeline | None = None
+        self._bp_pipeline = None  # type: ignore  # BPPipeline, lazy import
         self._replay_timer: QTimer | None = None
         self._start_time: float = 0.0
         self._frame_count: int = 0
         self._running: bool = False
         self._latest_vitals: VitalSigns | None = None
+        self._latest_bp_result = None  # type: ignore  # BPResult
         self._trend_tick_counter: int = 0
 
         # Data accumulation for export (CSV + HDF5 + EDF)
@@ -106,11 +109,14 @@ class MainWindow(QMainWindow):
 
         main_layout.addLayout(title_row)
 
-        # Tab widget
+        # Tab widget — always create all 3 tabs
         self._tabs = QTabWidget()
         self._subject_tab = SubjectTab()
+        from ui.bp_tab import BPTab
+        self._bp_tab = BPTab()
         self._research_tab = ResearchTab()
         self._tabs.addTab(self._subject_tab, tr("tab_subject"))
+        self._tabs.addTab(self._bp_tab, tr("tab_bp"))
         self._tabs.addTab(self._research_tab, tr("tab_research"))
         main_layout.addWidget(self._tabs, stretch=1)
 
@@ -143,6 +149,20 @@ class MainWindow(QMainWindow):
         self._save_btn = QPushButton(tr("btn_save"))
         self._save_btn.clicked.connect(self._on_save)
         ctrl_row.addWidget(self._save_btn)
+
+        # Mode toggle button (serial only)
+        if self._mode == "serial":
+            self._mode_btn = QPushButton(
+                tr("btn_mode_bp") if self._bp_mode else tr("btn_mode_hr")
+            )
+            self._mode_btn.setStyleSheet(
+                "QPushButton { background-color: #8e44ad; color: white; font-weight: bold; "
+                "padding: 8px 16px; border-radius: 4px; font-size: 10pt; }"
+                "QPushButton:hover { background-color: #9b59b6; }"
+                "QPushButton:disabled { background-color: #95a5a6; }"
+            )
+            self._mode_btn.clicked.connect(self._on_toggle_mode)
+            ctrl_row.addWidget(self._mode_btn)
 
         ctrl_row.addStretch()
 
@@ -221,10 +241,11 @@ class MainWindow(QMainWindow):
         self._stop_btn.setEnabled(True)
         if hasattr(self, '_select_btn'):
             self._select_btn.setEnabled(False)
+        if hasattr(self, '_mode_btn'):
+            self._mode_btn.setEnabled(False)
         self._status_label.setText(tr("status_starting"))
         self._status_label.setStyleSheet("color: #f39c12;")
-        thread = threading.Thread(target=self._serial_init_thread, daemon=True)
-        thread.start()
+        self._start_serial_io()
 
     def _serial_init_thread(self) -> None:
         try:
@@ -262,12 +283,22 @@ class MainWindow(QMainWindow):
             self._serial_status = tr("serial_connect_failed", ctrl_port, data_port)
             return
         print("[Serial Init] Booting radar...")
-        ok = self._radar_mgr.boot()
+        if self._bp_mode:
+            ok = self._radar_mgr.boot_bp()
+        else:
+            ok = self._radar_mgr.boot()
         print(f"[Serial Init] Boot {'OK' if ok else 'PARTIAL FAIL'}")
         self._stop_event = threading.Event()
         self._uart_parser.reset()
-        self._pipeline = Pipeline()
-        self._pipeline.start()
+        if self._bp_mode:
+            from bp_monitor.bp_pipeline import BPPipeline
+            self._bp_pipeline = BPPipeline("bp_matlab/bp_weights.mat")
+            self._bp_pipeline.start()
+            self._pipeline = None
+        else:
+            self._pipeline = Pipeline()
+            self._pipeline.start()
+            self._bp_pipeline = None
         self._start_time = time.time()
         self._frame_count = 0
         self._running = True
@@ -293,21 +324,33 @@ class MainWindow(QMainWindow):
                 frames = self._uart_parser.feed(raw)
                 for fft_data in frames:
                     self._frame_count += 1
-                    cube = fft_data.reshape(2, 4, 128)
-                    rx_combined = np.mean(cube[0, :, :], axis=0)
-                    frame = RadarFrame(
-                        timestamp=time.time(),
-                        frame_index=self._frame_count,
-                        header=FrameHeader(0, 1, 4, 2, 58000, 128, 1, 3000, 25, 1920, 60),
-                        data_cube=rx_combined.reshape(-1, 1, 1),
-                    )
+                    if self._bp_mode:
+                        cube = fft_data.reshape(1, 1, 32)
+                        rx_combined = cube[0, 0, :]
+                        frame = RadarFrame(
+                            timestamp=time.time(),
+                            frame_index=self._frame_count,
+                            header=FrameHeader(0, 1, 1, 1, 60000, 32, 1, 160, 50, 0, 0, 0, 5),
+                            data_cube=rx_combined.reshape(32, 1, 1),
+                        )
+                        target_queue = self._bp_pipeline.raw_queue
+                    else:
+                        cube = fft_data.reshape(2, 4, 128)
+                        rx_combined = np.mean(cube[0, :, :], axis=0)
+                        frame = RadarFrame(
+                            timestamp=time.time(),
+                            frame_index=self._frame_count,
+                            header=FrameHeader(0, 1, 4, 2, 58000, 128, 1, 3000, 25, 1920, 60),
+                            data_cube=rx_combined.reshape(-1, 1, 1),
+                        )
+                        target_queue = self._pipeline.raw_queue
                     while True:
                         try:
-                            self._pipeline.raw_queue.put_nowait(frame)
+                            target_queue.put_nowait(frame)
                             break
                         except queue.Full:
                             try:
-                                self._pipeline.raw_queue.get_nowait()
+                                target_queue.get_nowait()
                             except queue.Empty:
                                 pass
             except Exception as e:
@@ -376,6 +419,82 @@ class MainWindow(QMainWindow):
                 except queue.Empty:
                     pass
 
+    def _on_toggle_mode(self) -> None:
+        """Hot-switch between HR and BP monitoring modes."""
+        was_running = self._running
+
+        # 1. Stop current I/O
+        if was_running:
+            self._running = False
+            if self._stop_event:
+                self._stop_event.set()
+            if self._io_thread:
+                self._io_thread.join(timeout=3)
+
+        # 2. Stop pipeline
+        if self._pipeline:
+            self._pipeline.stop()
+            self._pipeline = None
+        if self._bp_pipeline:
+            self._bp_pipeline.stop()
+            self._bp_pipeline = None
+
+        # 3. Shutdown radar (keep serial ports open)
+        if self._radar_mgr:
+            self._radar_mgr.shutdown()
+
+        # 4. Switch mode
+        self._bp_mode = not self._bp_mode
+
+        # 5. Update UART parser
+        from io_engine.uart_parser import UartParser
+        bins = 32 if self._bp_mode else 1024
+        self._uart_parser = UartParser(bins_per_frame=bins)
+
+        # 6. Update UI
+        self._mode_btn.setText(
+            tr("btn_mode_hr") if self._bp_mode else tr("btn_mode_bp")
+        )
+
+        # 7. Reboot radar in new mode (no reconnect needed)
+        if self._bp_mode:
+            self._radar_mgr.boot_bp()
+        else:
+            self._radar_mgr.boot()
+
+        # 8. Start new pipeline
+        if self._bp_mode:
+            from bp_monitor.bp_pipeline import BPPipeline
+            self._bp_pipeline = BPPipeline("bp_matlab/bp_weights.mat")
+            self._bp_pipeline.start()
+            self._latest_vitals = None
+        else:
+            self._pipeline = Pipeline()
+            self._pipeline.start()
+            self._latest_bp_result = None
+
+        # 9. Restart I/O if was running
+        if was_running:
+            self._running = True
+            self._stop_event = threading.Event()
+            self._uart_parser.reset()
+            self._frame_count = 0
+            self._start_time = time.time()
+            self._io_thread = threading.Thread(
+                target=self._serial_io_loop, daemon=True)
+            self._io_thread.start()
+            self._status_label.setText(
+                tr("serial_capturing", "COM?", "COM?") if "COM?" in tr("serial_capturing", "COM?", "COM?") else "Capturing")
+            self._status_label.setStyleSheet("color: #27ae60;")
+        else:
+            self._status_label.setText(tr("status_standby"))
+            self._status_label.setStyleSheet("color: #f39c12;")
+
+    def _start_serial_io(self) -> None:
+        """Start radar boot + pipeline in current mode (non-blocking thread)."""
+        thread = threading.Thread(target=self._serial_init_thread, daemon=True)
+        thread.start()
+
     def _on_stop(self) -> None:
         self._running = False
         if self._mode == "serial":
@@ -393,6 +512,9 @@ class MainWindow(QMainWindow):
         if self._pipeline:
             self._pipeline.stop()
             self._pipeline = None
+        if self._bp_pipeline:
+            self._bp_pipeline.stop()
+            self._bp_pipeline = None
         if self._bin_reader:
             self._bin_reader.close()
             self._bin_reader = None
@@ -400,6 +522,8 @@ class MainWindow(QMainWindow):
         self._stop_btn.setEnabled(False)
         if hasattr(self, '_select_btn'):
             self._select_btn.setEnabled(True)
+        if hasattr(self, '_mode_btn'):
+            self._mode_btn.setEnabled(True)
         self._status_label.setText(tr("status_stopped"))
         self._status_label.setStyleSheet("color: #f39c12;")
 
@@ -467,6 +591,19 @@ class MainWindow(QMainWindow):
 
     # === UI Timer ===
 
+    def _poll_bp_results(self) -> None:
+        """Poll BP pipeline display queue and route to BPTab."""
+        try:
+            while not self._bp_pipeline.display_queue.empty():
+                self._latest_bp_result = self._bp_pipeline.display_queue.get_nowait()
+        except queue.Empty:
+            pass
+
+        if self._latest_bp_result is not None and self._bp_tab is not None:
+            self._bp_tab.update_display(self._latest_bp_result)
+            self._status_label.setText("● Monitoring")
+            self._status_label.setStyleSheet("color: #27ae60;")
+
     def _on_ui_tick(self) -> None:
         # Poll serial status
         if self._serial_status:
@@ -482,6 +619,10 @@ class MainWindow(QMainWindow):
                 self._status_label.setText(f"● {s}")
                 self._status_label.setStyleSheet("color: #27ae60;")
             self._serial_status = ""
+
+        if self._bp_mode and self._bp_pipeline is not None:
+            self._poll_bp_results()
+            return
 
         if not self._pipeline:
             return

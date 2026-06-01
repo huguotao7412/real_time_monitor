@@ -54,6 +54,27 @@ class RadarMgr:
         print(f"[RadarMgr] Boot {'OK' if all_ok else 'with warnings'}")
         return all_ok
 
+    def boot_bp(self) -> bool:
+        """Boot radar for BP mode: 1T1R, 32bin, 200Hz (5ms frame period)."""
+        commands = [
+            "mmwc open",
+            "mmwc stop",
+            "mmwc mode 0 1",         # 1T1R, 1DFFT
+            "mmwc frame 5 -6",       # 5ms period (200Hz), infinite
+            "mmwc uart on",
+            "mmwc baudrate 1000000",
+            "mmwc report cube -1",
+            "mmwc start",
+        ]
+        all_ok = True
+        for cmd in commands:
+            print(f"  [{cmd}]", flush=True)
+            ok = self._send_command(cmd)
+            if not ok:
+                all_ok = False
+        print(f"[RadarMgr] BP Boot {'OK' if all_ok else 'with warnings'}")
+        return all_ok
+
     def shutdown(self) -> None:
         self._send_command("mmwc stop")
         time.sleep(0.05)

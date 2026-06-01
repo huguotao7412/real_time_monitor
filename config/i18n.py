@@ -23,6 +23,14 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "app_title": "RS6240 生命体征监测系统",
         "tab_subject": "监测",
         "tab_research": "研究",
+        "tab_bp": "血压",
+        "bp_sbp_label": "SBP",
+        "bp_dbp_label": "DBP",
+        "bp_dist_label": "距离",
+        "bp_conf_label": "置信度",
+        "btn_mode_hr": "♥ 心率模式",
+        "btn_mode_bp": "💓 血压模式",
+        "status_switching": "切换模式中...",
 
         # Buttons
         "btn_start_capture": "▶ 开始采集",
@@ -126,6 +134,14 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "app_title": "RS6240 Vital Signs Monitor",
         "tab_subject": "Subject",
         "tab_research": "Research",
+        "tab_bp": "BP",
+        "bp_sbp_label": "SBP",
+        "bp_dbp_label": "DBP",
+        "bp_dist_label": "Distance",
+        "bp_conf_label": "Confidence",
+        "btn_mode_hr": "♥ Heart Rate",
+        "btn_mode_bp": "💓 Blood Pressure",
+        "status_switching": "Switching mode...",
 
         # Buttons
         "btn_start_capture": "▶ Start Capture",
