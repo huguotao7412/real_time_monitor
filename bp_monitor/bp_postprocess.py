@@ -51,10 +51,16 @@ def extract_bp(
 
     # Trim extremes, compute means, apply empirical corrections
     pks_sorted = np.sort(wf[peaks])
-    sbp = float(np.mean(pks_sorted[1:-1]) - 10.0)
+    if len(pks_sorted) >= 5:
+        sbp = float(np.mean(pks_sorted[1:-1]) - 10.0)
+    else:
+        sbp = float(np.mean(pks_sorted) - 10.0)
 
     vlys_sorted = np.sort(wf[valleys])
-    dbp = float(np.mean(vlys_sorted[1:-1]) - 20.0)
+    if len(vlys_sorted) >= 5:
+        dbp = float(np.mean(vlys_sorted[1:-1]) - 20.0)
+    else:
+        dbp = float(np.mean(vlys_sorted) - 20.0)
 
     info["confidence"] = min(1.0, min(len(peaks), len(valleys)) / 10.0)
 

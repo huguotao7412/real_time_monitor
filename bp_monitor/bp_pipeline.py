@@ -59,6 +59,8 @@ class BPPipeline:
         self._phase_buffer: deque[float] = deque(maxlen=self.MAX_FRAMES)
         self._frame_count = 0
         self._target_bin: int | None = None
+        self._cfar_buffer: list[np.ndarray] = []
+        self._low_signal_count: int = 0
 
     # -- public API ---------------------------------------------------------
 
@@ -91,42 +93,63 @@ class BPPipeline:
             try:
                 self._process_frame(frame)
             except Exception:
-                # Log and continue — single bad frame shouldn't crash the pipeline
-                pass
+                import traceback
+                print(f"[BPPipeline] Error in frame {self._frame_count}:")
+                traceback.print_exc()
 
     def _process_frame(self, frame: RadarFrame) -> None:
         data_cube = frame.data_cube  # [bins, doppler, rx]
 
-        # 1. Acquire target bin (first few frames, or periodic re-acquisition)
+        # 1. Acquire target bin (multi-frame CFAR, periodic re-acquisition)
         if self._target_bin is None:
-            candidates = find_target_bins_1d(
-                data_cube[:, :, :], self.DISTANCE_PER_BIN, num_targets=1
-            )
-            if len(candidates) > 0:
-                self._target_bin = int(candidates[0])
+            self._cfar_buffer.append(data_cube[:, :, :])
+            if len(self._cfar_buffer) >= 20:  # accumulate ~100ms for stable CFAR
+                acc_cube = np.concatenate(self._cfar_buffer, axis=1)  # [bins, 20, rx]
+                candidates = find_target_bins_1d(
+                    acc_cube, self.DISTANCE_PER_BIN, num_targets=1
+                )
+                if len(candidates) > 0:
+                    self._target_bin = int(candidates[0])
+                self._cfar_buffer.clear()
+            self._frame_count += 1
+            return  # keep accumulating until locked
 
         if self._target_bin is None:
             self._frame_count += 1
             return
 
-        # 2. Extract phase (MATLAB: 60 GHz -> 24 GHz frequency scaling)
+        # 2. Extract phase — store raw, scale AFTER unwrap
         phase = extract_phase(data_cube, self._target_bin)
-        phase_scaled = phase * (24.0 / 60.0)
-        self._phase_buffer.append(phase_scaled)
+        self._phase_buffer.append(phase)
         self._frame_count += 1
 
-        # 3. Process when buffer is full
-        if len(self._phase_buffer) < self.MAX_FRAMES:
+        # 3. Wait for initial buffer fill, then sliding window
+        if self._frame_count < self.MAX_FRAMES:
             return
+        if self._frame_count > self.MAX_FRAMES and (self._frame_count - self.MAX_FRAMES) % 40 != 0:
+            return  # process every 40 frames (~0.2s) after first batch
 
-        # Unwrap
+        # Unwrap first, then scale (MATLAB: 60 GHz -> 24 GHz)
         phase_arr = np.array(self._phase_buffer, dtype=np.float64)
         unwrapped = unwrap_phase(phase_arr)
+        unwrapped_scaled = unwrapped * (24.0 / 60.0)
 
         # 4. Signal cleaning
-        clean = clean_pulse_wave(unwrapped, fs=self.FS)
+        clean = clean_pulse_wave(unwrapped_scaled, fs=self.FS)
 
-        # 5. Downsample 200 Hz -> 50 Hz -> 256 points
+        # 5. Low-signal detection for re-acquisition
+        phase_range = float(np.max(unwrapped_scaled) - np.min(unwrapped_scaled))
+        if phase_range < 0.001:
+            self._low_signal_count += 1
+        else:
+            self._low_signal_count = 0
+
+        if self._low_signal_count >= 60:  # sustained low signal -> re-acquire
+            self._target_bin = None
+            self._cfar_buffer.clear()
+            self._low_signal_count = 0
+
+        # 6. Downsample 200 Hz -> 50 Hz -> 256 points
         n_target = int(len(clean) * self.FS_TARGET / self.FS)
         wave_50hz = resample(clean, n_target)
 
@@ -135,13 +158,13 @@ class BPPipeline:
         else:
             input_seq = np.pad(wave_50hz, (self.N_INPUT - len(wave_50hz), 0))
 
-        # 6. Neural network inference
+        # 7. Neural network inference
         bp_waveform = self._bp.predict(input_seq.astype(np.float32))
 
-        # 7. SBP / DBP
+        # 8. SBP / DBP
         sbp, dbp, info = extract_bp(bp_waveform, fs=self.FS_TARGET)
 
-        # 8. Push result
+        # 9. Push result
         result = BPResult(
             timestamp=time.time(),
             frame_index=self._frame_count,
@@ -153,8 +176,7 @@ class BPPipeline:
         )
         self._push_to_display(result)
 
-        # Clear buffer for next batch
-        self._phase_buffer.clear()
+        # Note: No _phase_buffer.clear() — deque(maxlen) gives natural sliding window
 
     def _push_to_display(self, result: BPResult) -> None:
         try:
@@ -164,4 +186,7 @@ class BPPipeline:
                 self.display_queue.get_nowait()
             except queue.Empty:
                 pass
-            self.display_queue.put_nowait(result)
+            try:
+                self.display_queue.put_nowait(result)
+            except queue.Full:
+                pass  # graceful drop if still full

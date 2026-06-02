@@ -128,7 +128,7 @@ class Pipeline:
         data_cube = frame.data_cube
 
         # 1. Range Bin 锁定 (CFAR, 前10帧)
-        if self._best_bin is None and self._frame_count < 10:
+        if self._best_bin is None:
             self._best_bin = find_best_range_bin(data_cube, fs=FS_HZ)
         if self._best_bin is None:
             return None
@@ -293,6 +293,10 @@ class Pipeline:
             if self._in_apnea:
                 self._in_apnea = False
                 self._breath_history.clear()  # 恢复呼吸时清空历史，避免滞后
+
+        # Range bin re-acquisition on sustained low signal
+        if self._low_signal_frame_count >= 30 and self._best_bin is not None:
+            self._best_bin = None
 
         # 连续 15 帧 (0.75秒) 平缓即触发屏息
         if self._low_signal_frame_count >= 15 and not self._in_apnea:
