@@ -116,8 +116,9 @@ class BPPipeline:
             # Try CFAR every 16 frames starting from 64 frames
             if n >= 64 and n % 16 == 0:
                 acc = np.concatenate(self._complex_buffer, axis=1)  # [32, N, 1]
+                acc_bg = acc - np.mean(acc, axis=1, keepdims=True)
                 candidates = find_target_bins_1d(
-                    acc, self.DISTANCE_PER_BIN, num_targets=1
+                    acc_bg, self.DISTANCE_PER_BIN, num_targets=1
                 )
                 if len(candidates) > 0:
                     self._target_bin = int(candidates[0])
@@ -126,7 +127,8 @@ class BPPipeline:
             # Fallback after 256 frames: pick strongest bin
             if self._target_bin is None and n >= 256:
                 acc = np.concatenate(self._complex_buffer, axis=1)
-                energy = np.mean(np.abs(acc), axis=(1, 2))
+                acc_bg = acc - np.mean(acc, axis=1, keepdims=True)
+                energy = np.mean(np.abs(acc_bg), axis=(1, 2))
                 energy[:2] = 0  # skip near-field DC
                 self._target_bin = int(np.argmax(energy))
                 print(f"[BPPipeline] Fallback lock: bin={self._target_bin} "
