@@ -31,6 +31,16 @@ from ui.subject_tab import SubjectTab
 from ui.research_tab import ResearchTab
 
 
+def _drain_queue(q) -> None:
+    """Drain all items from a queue without blocking."""
+    import queue as _queue_mod
+    while True:
+        try:
+            q.get_nowait()
+        except _queue_mod.Empty:
+            break
+
+
 class MainWindow(QMainWindow):
     def __init__(self, mode: str = "replay", replay_file: str | None = None):
         super().__init__()
@@ -437,11 +447,13 @@ class MainWindow(QMainWindow):
             if self._io_thread:
                 self._io_thread.join(timeout=3)
 
-        # 2. Stop pipeline
+        # 2. Drain and stop pipeline
         if self._pipeline:
+            _drain_queue(self._pipeline.display_queue)
             self._pipeline.stop()
             self._pipeline = None
         if self._bp_pipeline:
+            _drain_queue(self._bp_pipeline.display_queue)
             self._bp_pipeline.stop()
             self._bp_pipeline = None
 
