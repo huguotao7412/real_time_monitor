@@ -239,6 +239,20 @@ class SubjectTab(QWidget):
         else:
             self.setStyleSheet("")
 
+    def reset_display(self) -> None:
+        """Clear all displayed values to '--' state."""
+        self._breath_bpm_label.setText("--")
+        self._heart_bpm_label.setText("--")
+        self._breath_wave.set_data(np.array([], dtype=np.float32))
+        self._sqi.set_level(0.0, 0.0)
+        self._petals.set_breath_bpm(0, 0.0)
+        self._heart_icon.set_heart_bpm(0, 0.0)
+        self._status_label.setText(tr("status_standby"))
+        self._status_label.setStyleSheet("color: #f39c12;")
+        self._error_overlay.hide()
+        self._error_start_time = None
+        self.setStyleSheet("")
+
 
 class HeartBeatIcon(QWidget):
     """Bezier heart shape that pulses at heart_bpm frequency.
