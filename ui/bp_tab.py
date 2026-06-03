@@ -192,3 +192,13 @@ class BPTab(QWidget):
         self._update_label.setText(
             f"Updated {now - r.timestamp:.0f}s ago"
         )
+
+    def reset_display(self) -> None:
+        """Clear all BP values to '--' state."""
+        self._sbp_panel.set_value(float('nan'))
+        self._dbp_panel.set_value(float('nan'))
+        self._wave_buffer.clear()
+        self._wave.set_data(np.array([], dtype=np.float32))
+        self._dist_label.setText("Distance: --")
+        self._conf_dots.set_confidence(0.0)
+        self._update_label.setText("")
