@@ -1,9 +1,11 @@
-"""Main window — thin shell hosting SubjectTab and ResearchTab via QTabWidget."""
+"""Main window — thin shell hosting SubjectTab, BPTab, and ResearchTab via QTabWidget.
+
+Mode-specific logic (HR vs BP) is delegated to MonitorMode strategy objects.
+"""
 
 import os
 import glob
 import time
-import queue
 import threading
 from datetime import datetime
 
@@ -11,34 +13,22 @@ import numpy as np
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QFileDialog, QMessageBox, QLabel, QPushButton,
-    QTabWidget,
+    QTabWidget, QInputDialog,
 )
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QFont
 
 from config.protocol import UI_REFRESH_MS
 from config.i18n import tr, I18n
-from dsp_pipeline.pipeline import Pipeline
-from dsp_pipeline.vital_signs import VitalSigns
 from io_engine.bin_reader import BinFileReader
 from io_engine.uart_parser import UartParser
 from io_engine.serial_manager import SerialManager
 from io_engine.radar_mgr import RadarMgr
 from io_engine.data_exporter import export_csv, export_hdf5, export_edf
-from models.radar_frame import RadarFrame, FrameHeader
 
 from ui.subject_tab import SubjectTab
 from ui.research_tab import ResearchTab
-
-
-def _drain_queue(q) -> None:
-    """Drain all items from a queue without blocking."""
-    import queue as _queue_mod
-    while True:
-        try:
-            q.get_nowait()
-        except _queue_mod.Empty:
-            break
+from ui.monitor_mode import MonitorMode, HRMode, BPMode
 
 
 class MainWindow(QMainWindow):
@@ -48,39 +38,34 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(tr("window_title"))
         self.resize(1200, 800)
 
-        self._mode = mode
-        self._bp_mode = bp_replay  # BP mode for replay via --bp flag, or via toggle
+        self._mode_type = mode  # "serial" or "replay"
         self._replay_file = replay_file
+
+        # Mode object (Strategy pattern) — the ONLY mode reference
+        self._current_mode: MonitorMode = BPMode() if bp_replay else HRMode()
+
+        # Replay
         self._bin_reader: BinFileReader | None = None
-        self._pipeline: Pipeline | None = None
-        self._bp_pipeline = None  # type: ignore  # BPPipeline, lazy import
         self._replay_timer: QTimer | None = None
+
+        # Shared state
         self._start_time: float = 0.0
         self._frame_count: int = 0
         self._running: bool = False
-        self._latest_vitals: VitalSigns | None = None
-        self._latest_bp_result = None  # type: ignore  # BPResult
-        self._trend_tick_counter: int = 0
-
-        # Data accumulation for export (CSV + HDF5 + EDF)
-        self._csv_rows: list[dict] = []
-        self._breath_waveform_accum: list[np.ndarray] = []
-        self._heart_waveform_accum: list[np.ndarray] = []
-        self._bpm_history: list[tuple[float, float, float]] = []   # (t, rpm, bpm)
-        self._sqi_history: list[dict] = []  # {phase_range, breath_ratio, sqi_level}
 
         # Serial mode
         self._serial_mgr: SerialManager | None = None
         self._radar_mgr: RadarMgr | None = None
         self._uart_parser: UartParser | None = None
-        self._io_thread = None
-        self._stop_event = None
+        self._io_thread: threading.Thread | None = None
+        self._stop_event: threading.Event | None = None
         self._serial_status: str = ""
         self._serial_error: bool = False
         if mode == "serial":
             self._serial_mgr = SerialManager()
             self._radar_mgr = RadarMgr(self._serial_mgr)
-            self._uart_parser = UartParser(bins_per_frame=1024)
+            self._uart_parser = UartParser(
+                bins_per_frame=self._current_mode.uart_bins)
 
         self._setup_ui()
         self._setup_timers()
@@ -113,7 +98,7 @@ class MainWindow(QMainWindow):
         self._file_label.setStyleSheet("color: #95a5a6; font-size: 9pt;")
         title_row.addWidget(self._file_label)
 
-        if self._mode == "replay":
+        if self._mode_type == "replay":
             self._select_btn = QPushButton(tr("btn_select_file"))
             self._select_btn.clicked.connect(self._on_select_file)
             title_row.addWidget(self._select_btn)
@@ -135,7 +120,7 @@ class MainWindow(QMainWindow):
         ctrl_row = QHBoxLayout()
         ctrl_row.setContentsMargins(12, 4, 12, 8)
 
-        label = tr("btn_start_capture") if self._mode == "serial" else tr("btn_start_replay")
+        label = tr("btn_start_capture") if self._mode_type == "serial" else tr("btn_start_replay")
         self._start_btn = QPushButton(label)
         self._start_btn.setStyleSheet(
             "QPushButton { background-color: #27ae60; color: white; font-weight: bold; "
@@ -162,9 +147,10 @@ class MainWindow(QMainWindow):
         ctrl_row.addWidget(self._save_btn)
 
         # Mode toggle button (serial only)
-        if self._mode == "serial":
+        if self._mode_type == "serial":
             self._mode_btn = QPushButton(
-                tr("btn_mode_bp") if self._bp_mode else tr("btn_mode_hr")
+                tr("btn_mode_bp") if isinstance(self._current_mode, HRMode)
+                else tr("btn_mode_hr")
             )
             self._mode_btn.setStyleSheet(
                 "QPushButton { background-color: #8e44ad; color: white; font-weight: bold; "
@@ -190,8 +176,11 @@ class MainWindow(QMainWindow):
 
         main_layout.addLayout(ctrl_row)
 
+        # Apply initial tab visibility
+        self._update_tab_visibility()
+
         # Auto-select latest file
-        if self._mode == "replay" and not self._replay_file:
+        if self._mode_type == "replay" and not self._replay_file:
             self._replay_file = self._find_latest_bin()
         if self._replay_file:
             self._file_label.setText(os.path.basename(self._replay_file))
@@ -206,20 +195,32 @@ class MainWindow(QMainWindow):
         if hasattr(self, '_select_btn'):
             self._select_btn.setText(tr("btn_select_file"))
         self._tabs.setTabText(0, tr("tab_subject"))
-        self._tabs.setTabText(1, tr("tab_research"))
-        label = tr("btn_start_capture") if self._mode == "serial" else tr("btn_start_replay")
+        self._tabs.setTabText(1, tr("tab_bp"))
+        self._tabs.setTabText(2, tr("tab_research"))
+        label = tr("btn_start_capture") if self._mode_type == "serial" else tr("btn_start_replay")
         self._start_btn.setText(label)
         self._stop_btn.setText(tr("btn_stop"))
         self._save_btn.setText(tr("btn_save"))
         self._lang_menu.setTitle(tr("menu_language"))
         self._zh_action.setText(tr("lang_zh"))
         self._en_action.setText(tr("lang_en"))
-        # Status labels are set dynamically; keep current state
+        # Update mode button text
+        if hasattr(self, '_mode_btn'):
+            self._mode_btn.setText(
+                tr("btn_mode_hr") if isinstance(self._current_mode, BPMode)
+                else tr("btn_mode_bp")
+            )
 
     def _setup_timers(self) -> None:
         self._ui_timer = QTimer()
         self._ui_timer.timeout.connect(self._on_ui_tick)
         self._ui_timer.start(UI_REFRESH_MS)
+
+    def _update_tab_visibility(self) -> None:
+        show_subject, show_bp, show_research = self._current_mode.tab_visibility()
+        self._tabs.setTabVisible(0, show_subject)
+        self._tabs.setTabVisible(1, show_bp)
+        self._tabs.setTabVisible(2, show_research)
 
     @staticmethod
     def _find_latest_bin() -> str | None:
@@ -242,7 +243,7 @@ class MainWindow(QMainWindow):
             self._file_label.setStyleSheet("color: #3498db; font-size: 9pt;")
 
     def _on_start(self) -> None:
-        if self._mode == "serial":
+        if self._mode_type == "serial":
             self._start_serial()
         else:
             self._start_replay()
@@ -256,7 +257,9 @@ class MainWindow(QMainWindow):
             self._mode_btn.setEnabled(False)
         self._status_label.setText(tr("status_starting"))
         self._status_label.setStyleSheet("color: #f39c12;")
-        self._start_serial_io()
+        # Boot radar + start pipeline + start I/O on background thread
+        thread = threading.Thread(target=self._serial_init_thread, daemon=True)
+        thread.start()
 
     def _serial_init_thread(self) -> None:
         try:
@@ -275,7 +278,8 @@ class MainWindow(QMainWindow):
         ctrl_port = data_port = ""
         for p in ports:
             try:
-                info = next((i for i in serial.tools.list_ports.comports() if i.device == p), None)
+                info = next((i for i in serial.tools.list_ports.comports()
+                             if i.device == p), None)
                 desc = info.description if info else ""
             except Exception:
                 desc = ""
@@ -294,30 +298,14 @@ class MainWindow(QMainWindow):
             self._serial_status = tr("serial_connect_failed", ctrl_port, data_port)
             return
         print("[Serial Init] Booting radar...")
-        if self._bp_mode:
-            ok = self._radar_mgr.boot_bp()
-        else:
-            ok = self._radar_mgr.boot()
-        print(f"[Serial Init] Boot {'OK' if ok else 'PARTIAL FAIL'}")
+        self._current_mode.boot_radar(self._radar_mgr)
         self._stop_event = threading.Event()
         self._uart_parser.reset()
-        if self._bp_mode:
-            from bp_monitor.bp_pipeline import BPPipeline
-            self._bp_pipeline = BPPipeline("bp_matlab/bp_weights.mat")
-            self._bp_pipeline.start()
-            self._pipeline = None
-        else:
-            self._pipeline = Pipeline()
-            self._pipeline.start()
-            self._bp_pipeline = None
+        self._current_mode.start()
+        self._current_mode.clear_data()
         self._start_time = time.time()
         self._frame_count = 0
         self._running = True
-        self._csv_rows.clear()
-        self._breath_waveform_accum.clear()
-        self._heart_waveform_accum.clear()
-        self._bpm_history.clear()
-        self._sqi_history.clear()
         self._research_tab.start()
         self._serial_error = False
         self._serial_status = tr("serial_capturing", ctrl_port, data_port)
@@ -335,50 +323,11 @@ class MainWindow(QMainWindow):
                 frames = self._uart_parser.feed(raw)
                 for fft_data in frames:
                     self._frame_count += 1
-                    frame = self._build_radar_frame(fft_data)
-                    if self._bp_mode:
-                        target_queue = self._bp_pipeline.raw_queue
-                    else:
-                        target_queue = self._pipeline.raw_queue
-                    while True:
-                        try:
-                            target_queue.put_nowait(frame)
-                            break
-                        except queue.Full:
-                            try:
-                                target_queue.get_nowait()
-                            except queue.Empty:
-                                pass
+                    frame = self._current_mode.build_frame(fft_data, self._frame_count)
+                    self._current_mode.feed_frame(frame)
             except Exception as e:
                 print(f"[Serial I/O] {e}")
                 time.sleep(0.5)
-
-    def _build_bp_frame(self, fft_data: np.ndarray) -> RadarFrame:
-        """Build a RadarFrame from raw FFT data in BP mode (1T1R, 32 bins)."""
-        rx_combined = fft_data.ravel()[:32]
-        return RadarFrame(
-            timestamp=time.time(),
-            frame_index=self._frame_count,
-            header=FrameHeader(0, 1, 1, 1, 60000, 32, 1, 160, 50, 0, 0, 0, 5),
-            data_cube=rx_combined.reshape(32, 1, 1),
-        )
-
-    def _build_hr_frame(self, fft_data: np.ndarray) -> RadarFrame:
-        """Build a RadarFrame from raw FFT data in HR mode (2T4R, 128 bins)."""
-        cube = fft_data.reshape(2, 4, -1)
-        rx_combined = np.mean(cube[0, :, :], axis=0)
-        return RadarFrame(
-            timestamp=time.time(),
-            frame_index=self._frame_count,
-            header=FrameHeader(0, 1, 4, 2, 58000, 128, 1, 3000, 25, 1920, 60),
-            data_cube=rx_combined.reshape(-1, 1, 1),
-        )
-
-    def _build_radar_frame(self, fft_data: np.ndarray) -> RadarFrame:
-        """Build RadarFrame for current mode (BP or HR)."""
-        if self._bp_mode:
-            return self._build_bp_frame(fft_data)
-        return self._build_hr_frame(fft_data)
 
     def _start_replay(self) -> None:
         if not self._replay_file or not os.path.exists(self._replay_file):
@@ -386,24 +335,15 @@ class MainWindow(QMainWindow):
             return
         reader = BinFileReader(self._replay_file)
         if not reader.open():
-            QMessageBox.critical(self, tr("dialog_error"), tr("dialog_cannot_open", self._replay_file))
+            QMessageBox.critical(self, tr("dialog_error"),
+                                 tr("dialog_cannot_open", self._replay_file))
             return
         self._bin_reader = reader
-        if self._bp_mode:
-            from bp_monitor.bp_pipeline import BPPipeline
-            self._bp_pipeline = BPPipeline("bp_matlab/bp_weights.mat")
-            self._bp_pipeline.start()
-        else:
-            self._pipeline = Pipeline()
-            self._pipeline.start()
+        self._current_mode.start()
+        self._current_mode.clear_data()
         self._start_time = time.time()
         self._frame_count = 0
         self._running = True
-        self._csv_rows.clear()
-        self._breath_waveform_accum.clear()
-        self._heart_waveform_accum.clear()
-        self._bpm_history.clear()
-        self._sqi_history.clear()
         self._research_tab.start()
         self._start_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
@@ -430,21 +370,11 @@ class MainWindow(QMainWindow):
                 self._select_btn.setEnabled(True)
             return
         self._frame_count += 1
-        frame = self._build_radar_frame(frames[0])
-        target_queue = (self._bp_pipeline.raw_queue if self._bp_mode
-                        else self._pipeline.raw_queue)
-        while True:
-            try:
-                target_queue.put_nowait(frame)
-                break
-            except queue.Full:
-                try:
-                    target_queue.get_nowait()
-                except queue.Empty:
-                    pass
+        frame = self._current_mode.build_frame(frames[0], self._frame_count)
+        self._current_mode.feed_frame(frame)
 
     def _on_toggle_mode(self) -> None:
-        """Hot-switch between HR and BP monitoring modes."""
+        """Hot-switch between HR and BP monitoring modes (serial only)."""
         was_running = self._running
 
         # 1. Stop current I/O
@@ -452,53 +382,54 @@ class MainWindow(QMainWindow):
             self._running = False
             if self._stop_event:
                 self._stop_event.set()
+            # Close serial data port to unblock read_data()
+            if self._serial_mgr and self._serial_mgr.data_serial:
+                try:
+                    self._serial_mgr.data_serial.close()
+                except Exception:
+                    pass
             if self._io_thread:
-                self._io_thread.join(timeout=3)
+                self._io_thread.join(timeout=5)
 
-        # 2. Drain and stop pipeline
-        if self._pipeline:
-            _drain_queue(self._pipeline.display_queue)
-            self._pipeline.stop()
-            self._pipeline = None
-        if self._bp_pipeline:
-            _drain_queue(self._bp_pipeline.display_queue)
-            self._bp_pipeline.stop()
-            self._bp_pipeline = None
-
-        # 3. Shutdown radar (keep serial ports open)
+        # 2. Stop pipeline + shutdown radar
+        self._current_mode.stop()
         if self._radar_mgr:
             self._radar_mgr.shutdown()
 
-        # 4. Switch mode
-        self._bp_mode = not self._bp_mode
+        # 3. Swap mode
+        was_bp = isinstance(self._current_mode, BPMode)
+        self._current_mode = HRMode() if was_bp else BPMode()
 
-        # 5. Update UART parser
-        from io_engine.uart_parser import UartParser
-        bins = 32 if self._bp_mode else 1024
-        self._uart_parser = UartParser(bins_per_frame=bins)
+        # 4. Rebuild UART parser for new mode
+        self._uart_parser = UartParser(bins_per_frame=self._current_mode.uart_bins)
 
-        # 6. Update UI
+        # 5. Update UI
+        self._update_tab_visibility()
         self._mode_btn.setText(
-            tr("btn_mode_hr") if self._bp_mode else tr("btn_mode_bp")
+            tr("btn_mode_hr") if isinstance(self._current_mode, BPMode)
+            else tr("btn_mode_bp")
         )
 
-        # 7-8. If was running, restart radar + pipeline in new mode.
-        # If not running, defer to _on_serial_start.
-        if was_running:
-            if self._bp_mode:
-                self._radar_mgr.boot_bp()
-                from bp_monitor.bp_pipeline import BPPipeline
-                self._bp_pipeline = BPPipeline("bp_matlab/bp_weights.mat")
-                self._bp_pipeline.start()
-                self._latest_vitals = None
-            else:
-                self._radar_mgr.boot()
-                self._pipeline = Pipeline()
-                self._pipeline.start()
-                self._latest_bp_result = None
+        # 6. Reset inactive tabs to "--"
+        if was_bp:
+            self._bp_tab.reset_display()
+        else:
+            self._subject_tab.reset_display()
+            self._research_tab.reset_display()
 
-        # 9. Restart I/O if was running
+        # 7. Restart if was running
         if was_running:
+            # Re-open data port
+            try:
+                self._serial_mgr.open_data(
+                    self._serial_mgr.data_port,
+                    baudrate=self._radar_mgr.data_baudrate,
+                )
+            except Exception:
+                pass
+            self._current_mode.boot_radar(self._radar_mgr)
+            self._current_mode.start()
+            self._current_mode.clear_data()
             self._running = True
             self._stop_event = threading.Event()
             self._uart_parser.reset()
@@ -507,40 +438,33 @@ class MainWindow(QMainWindow):
             self._io_thread = threading.Thread(
                 target=self._serial_io_loop, daemon=True)
             self._io_thread.start()
-            self._status_label.setText(
-                tr("serial_capturing", "COM?", "COM?") if "COM?" in tr("serial_capturing", "COM?", "COM?") else "Capturing")
+            self._status_label.setText("● Capturing")
             self._status_label.setStyleSheet("color: #27ae60;")
         else:
             self._status_label.setText(tr("status_standby"))
             self._status_label.setStyleSheet("color: #f39c12;")
 
-    def _start_serial_io(self) -> None:
-        """Start radar boot + pipeline in current mode (non-blocking thread)."""
-        thread = threading.Thread(target=self._serial_init_thread, daemon=True)
-        thread.start()
-
     def _on_stop(self) -> None:
         self._running = False
-        if self._mode == "serial":
+        if self._mode_type == "serial":
             if self._radar_mgr:
                 self._radar_mgr.shutdown()
             if self._stop_event:
                 self._stop_event.set()
+            # Close serial to unblock read_data
+            if self._serial_mgr and self._serial_mgr.data_serial:
+                try:
+                    self._serial_mgr.data_serial.close()
+                except Exception:
+                    pass
             if self._io_thread:
-                self._io_thread.join(timeout=3)
+                self._io_thread.join(timeout=5)
             if self._serial_mgr:
                 self._serial_mgr.close()
         if self._replay_timer:
             self._replay_timer.stop()
             self._replay_timer = None
-        if self._pipeline:
-            _drain_queue(self._pipeline.display_queue)
-            self._pipeline.stop()
-            self._pipeline = None
-        if self._bp_pipeline:
-            _drain_queue(self._bp_pipeline.display_queue)
-            self._bp_pipeline.stop()
-            self._bp_pipeline = None
+        self._current_mode.stop()
         if self._bin_reader:
             self._bin_reader.close()
             self._bin_reader = None
@@ -554,8 +478,6 @@ class MainWindow(QMainWindow):
         self._status_label.setStyleSheet("color: #f39c12;")
 
     def _on_save(self) -> None:
-        from PyQt6.QtWidgets import QInputDialog
-
         formats = [
             tr("export_format_csv"),
             tr("export_format_hdf5"),
@@ -572,12 +494,30 @@ class MainWindow(QMainWindow):
             return
 
         try:
+            data = self._current_mode.get_export_data()
             if choice == tr("export_format_csv"):
-                self._do_export_csv(path)
+                vitals = data.get("latest_vitals")
+                breath = vitals.breath_waveform if vitals else np.array([])
+                heart = vitals.heart_waveform if vitals else np.array([])
+                export_csv(path, data.get("csv_rows", []), breath, heart)
             elif choice == tr("export_format_hdf5"):
-                self._do_export_hdf5(path)
+                breath_hist = (np.array(data["breath_waveform_accum"])
+                               if data.get("breath_waveform_accum") else np.array([]))
+                heart_hist = (np.array(data["heart_waveform_accum"])
+                              if data.get("heart_waveform_accum") else np.array([]))
+                metadata = {
+                    "device": "RS6240",
+                    "fs": 20,
+                    "session_duration_s": time.time() - self._start_time if self._start_time > 0 else 0,
+                }
+                export_hdf5(path, breath_hist, heart_hist,
+                            data.get("bpm_history", []),
+                            data.get("sqi_history", []), metadata)
             elif choice == tr("export_format_edf"):
-                self._do_export_edf(path)
+                vitals = data.get("latest_vitals")
+                breath = vitals.breath_waveform if vitals else np.array([])
+                heart = vitals.heart_waveform if vitals else np.array([])
+                export_edf(path, breath, heart, fs=20.0)
             QMessageBox.information(
                 self, tr("dialog_save_done"), tr("dialog_save_done_msg", path)
             )
@@ -586,49 +526,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, tr("dialog_error"), str(e))
 
-    def _do_export_csv(self, path: str) -> None:
-        breath = self._latest_vitals.breath_waveform if self._latest_vitals else np.array([])
-        heart = self._latest_vitals.heart_waveform if self._latest_vitals else np.array([])
-        export_csv(path, self._csv_rows, breath, heart)
-
-    def _do_export_hdf5(self, path: str) -> None:
-        breath_hist = (
-            np.array(self._breath_waveform_accum)
-            if self._breath_waveform_accum
-            else np.array([])
-        )
-        heart_hist = (
-            np.array(self._heart_waveform_accum)
-            if self._heart_waveform_accum
-            else np.array([])
-        )
-        metadata = {
-            "device": "RS6240",
-            "fs": 20,
-            "session_duration_s": time.time() - self._start_time if self._start_time > 0 else 0,
-        }
-        export_hdf5(path, breath_hist, heart_hist,
-                    self._bpm_history, self._sqi_history, metadata)
-
-    def _do_export_edf(self, path: str) -> None:
-        breath = self._latest_vitals.breath_waveform if self._latest_vitals else np.array([])
-        heart = self._latest_vitals.heart_waveform if self._latest_vitals else np.array([])
-        export_edf(path, breath, heart, fs=20.0)
-
     # === UI Timer ===
-
-    def _poll_bp_results(self) -> None:
-        """Poll BP pipeline display queue and route to BPTab."""
-        try:
-            while not self._bp_pipeline.display_queue.empty():
-                self._latest_bp_result = self._bp_pipeline.display_queue.get_nowait()
-        except queue.Empty:
-            pass
-
-        if self._latest_bp_result is not None and self._bp_tab is not None:
-            self._bp_tab.update_display(self._latest_bp_result)
-            self._status_label.setText("● Monitoring")
-            self._status_label.setStyleSheet("color: #27ae60;")
 
     def _on_ui_tick(self) -> None:
         # Poll serial status
@@ -646,114 +544,24 @@ class MainWindow(QMainWindow):
                 self._status_label.setStyleSheet("color: #27ae60;")
             self._serial_status = ""
 
-        if self._bp_mode and self._bp_pipeline is not None:
-            self._poll_bp_results()
+        if not self._running:
             return
 
-        if not self._pipeline:
-            return
+        # Delegate display polling to current mode
+        self._current_mode.poll_and_update(
+            self._subject_tab, self._bp_tab, self._research_tab,
+            self._status_label, self._elapsed_label, self._frame_rate_label,
+            self._start_time, self._frame_count,
+        )
 
-        try:
-            while not self._pipeline.display_queue.empty():
-                self._latest_vitals = self._pipeline.display_queue.get_nowait()
-        except queue.Empty:
-            pass
-
-        if self._latest_vitals is not None:
-            q = self._latest_vitals.quality
-            calib_done = self._pipeline.calibration_done
-            calib_prog = self._pipeline.calibration_progress
-
-            # Subject tab always gets data
-            self._subject_tab.update_display(
-                breath_bpm=self._latest_vitals.breath_bpm,
-                heart_bpm=self._latest_vitals.heart_bpm,
-                breath_waveform=self._latest_vitals.breath_waveform,
-                quality=q,
-                calibration_done=calib_done,
-                calibration_progress=calib_prog,
-            )
-
-            # Research tab always gets data
-            self._trend_tick_counter += 1
-            trend_sample = (self._trend_tick_counter % 20 == 0)  # ~1 sample/sec
-            self._research_tab.update_display(
-                breath_bpm=self._latest_vitals.breath_bpm,
-                heart_bpm=self._latest_vitals.heart_bpm,
-                breath_waveform=self._latest_vitals.breath_waveform,
-                heart_waveform=self._latest_vitals.heart_waveform,
-                quality=q,
-                sample_for_trend=trend_sample,
-            )
-
-            # Waveform accumulation (every display tick ~30fps for export)
-            if self._latest_vitals.breath_waveform.size > 0:
-                self._breath_waveform_accum.append(
-                    self._latest_vitals.breath_waveform.copy()
-                )
-            if self._latest_vitals.heart_waveform.size > 0:
-                self._heart_waveform_accum.append(
-                    self._latest_vitals.heart_waveform.copy()
-                )
-
-            # CSV row accumulation (once per second)
-            if trend_sample and q is not None:
-                phase_range_raw = float(
-                    np.max(self._latest_vitals.breath_waveform)
-                    - np.min(self._latest_vitals.breath_waveform)
-                ) if len(self._latest_vitals.breath_waveform) > 0 else 0.0
-
-                sqi = 0
-                br = q.get("breath_ratio", 0)
-                pr = q.get("phase_range", 0)
-                if pr >= 0.01 and br >= 0.15:
-                    sqi = 3
-                elif pr >= 0.005 and br >= 0.05:
-                    sqi = 2
-                elif pr > 0 or br > 0:
-                    sqi = 1
-
-                # BPM & SQI history for HDF5/EDF export
-                elapsed_t = time.time() - self._start_time if self._start_time > 0 else 0
-                self._bpm_history.append((
-                    elapsed_t,
-                    self._latest_vitals.breath_bpm,
-                    self._latest_vitals.heart_bpm,
-                ))
-                self._sqi_history.append({
-                    "phase_range": q.get("phase_range", 0.0),
-                    "breath_ratio": q.get("breath_ratio", 0.0),
-                    "sqi_level": sqi,
-                })
-
-                self._csv_rows.append({
-                    "Timestamp": datetime.now().isoformat(),
-                    "FrameIndex": self._latest_vitals.frame_index,
-                    "RangeBin": self._pipeline.best_range_bin if self._pipeline.best_range_bin is not None else 0,
-                    "RawPhase": round(phase_range_raw, 6),
-                    "BreathBPM": self._latest_vitals.breath_bpm,
-                    "HeartBPM": self._latest_vitals.heart_bpm,
-                    "PhaseRange": round(q.get("phase_range", 0), 6),
-                    "BreathRatio": round(q.get("breath_ratio", 0), 4),
-                    "HeartProminence": round(q.get("heart_prominence", 0), 4),
-                    "ApneaFlag": 1 if q.get("apnea_state") else 0,
-                    "SQI_Level": sqi,
-                })
-
-            # Status bar — simplified
-            if q and not q.get("valid") and calib_done:
-                self._status_label.setText(tr("status_signal_error"))
-                self._status_label.setStyleSheet("color: #e74c3c;")
-            elif self._running:
-                self._status_label.setText(tr("status_monitoring"))
-                self._status_label.setStyleSheet("color: #27ae60;")
-
+        # Shared: frame rate + elapsed
         if self._start_time > 0:
             elapsed = time.time() - self._start_time
             if elapsed > 0:
-                self._frame_rate_label.setText(tr("frame_rate", f"{self._frame_count / elapsed:.1f}"))
-            m, s = divmod(int(elapsed), 60)
-            self._elapsed_label.setText(tr("elapsed", f"{m:02d}:{s:02d}"))
+                self._frame_rate_label.setText(
+                    tr("frame_rate", f"{self._frame_count / elapsed:.1f}"))
+            m, s_div = divmod(int(elapsed), 60)
+            self._elapsed_label.setText(tr("elapsed", f"{m:02d}:{s_div:02d}"))
 
     def closeEvent(self, event) -> None:
         self._on_stop()
