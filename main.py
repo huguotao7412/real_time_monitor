@@ -11,19 +11,25 @@ from ui.main_window import MainWindow
 
 
 def main():
-    mode = "serial"  # Default: live serial
+    mode = "serial"
     replay_file = None
-    if len(sys.argv) > 1:
-        if sys.argv[1] == "-r" and len(sys.argv) > 2:
-            replay_file = sys.argv[2]
+    bp_replay = False
+    args = sys.argv[1:]
+    i = 0
+    while i < len(args):
+        if args[i] in ("-r", "--replay"):
+            if i + 1 < len(args) and not args[i + 1].startswith("-"):
+                replay_file = args[i + 1]
+                i += 1
             mode = "replay"
-        elif sys.argv[1] in ("-r", "--replay"):
-            mode = "replay"
-        elif sys.argv[1] in ("-s", "--serial"):
+        elif args[i] == "--bp":
+            bp_replay = True
+        elif args[i] in ("-s", "--serial"):
             mode = "serial"
         else:
-            replay_file = sys.argv[1]
+            replay_file = args[i]
             mode = "replay"
+        i += 1
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
@@ -40,7 +46,7 @@ def main():
     palette.setColor(QPalette.ColorRole.HighlightedText, QColor(255, 255, 255))
     app.setPalette(palette)
 
-    window = MainWindow(mode=mode, replay_file=replay_file)
+    window = MainWindow(mode=mode, replay_file=replay_file, bp_replay=bp_replay)
     window.show()
     sys.exit(app.exec())
 

@@ -42,13 +42,14 @@ def _drain_queue(q) -> None:
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, mode: str = "replay", replay_file: str | None = None):
+    def __init__(self, mode: str = "replay", replay_file: str | None = None,
+                 bp_replay: bool = False):
         super().__init__()
         self.setWindowTitle(tr("window_title"))
         self.resize(1200, 800)
 
         self._mode = mode
-        self._bp_mode = False  # Start in HR mode, toggle button switches
+        self._bp_mode = bp_replay  # BP mode for replay via --bp flag, or via toggle
         self._replay_file = replay_file
         self._bin_reader: BinFileReader | None = None
         self._pipeline: Pipeline | None = None
@@ -388,8 +389,13 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, tr("dialog_error"), tr("dialog_cannot_open", self._replay_file))
             return
         self._bin_reader = reader
-        self._pipeline = Pipeline()
-        self._pipeline.start()
+        if self._bp_mode:
+            from bp_monitor.bp_pipeline import BPPipeline
+            self._bp_pipeline = BPPipeline("bp_matlab/bp_weights.mat")
+            self._bp_pipeline.start()
+        else:
+            self._pipeline = Pipeline()
+            self._pipeline.start()
         self._start_time = time.time()
         self._frame_count = 0
         self._running = True
@@ -425,13 +431,15 @@ class MainWindow(QMainWindow):
             return
         self._frame_count += 1
         frame = self._build_radar_frame(frames[0])
+        target_queue = (self._bp_pipeline.raw_queue if self._bp_mode
+                        else self._pipeline.raw_queue)
         while True:
             try:
-                self._pipeline.raw_queue.put_nowait(frame)
+                target_queue.put_nowait(frame)
                 break
             except queue.Full:
                 try:
-                    self._pipeline.raw_queue.get_nowait()
+                    target_queue.get_nowait()
                 except queue.Empty:
                     pass
 
@@ -526,9 +534,11 @@ class MainWindow(QMainWindow):
             self._replay_timer.stop()
             self._replay_timer = None
         if self._pipeline:
+            _drain_queue(self._pipeline.display_queue)
             self._pipeline.stop()
             self._pipeline = None
         if self._bp_pipeline:
+            _drain_queue(self._bp_pipeline.display_queue)
             self._bp_pipeline.stop()
             self._bp_pipeline = None
         if self._bin_reader:
