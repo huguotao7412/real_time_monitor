@@ -445,11 +445,17 @@ class BPInference:
         Returns:
             float32 [256], reconstructed BP waveform in mmHg
         """
-        x_norm = (np.asarray(wave_256, dtype=np.float32) - self.x_min) / self.x_rng
+        x = np.asarray(wave_256, dtype=np.float32)
+        x_norm = (x - self.x_min) / self.x_rng
+        print(f"[BPInference] input range=[{float(np.min(x)):.4f}, {float(np.max(x)):.4f}]  "
+              f"x_min={self.x_min:.4f} x_max={self.x_max:.4f}  "
+              f"norm_range=[{float(np.min(x_norm)):.4f}, {float(np.max(x_norm)):.4f}]")
         x_t = torch.from_numpy(x_norm).unsqueeze(0).unsqueeze(0)
 
         with torch.no_grad():
             y_t = self.model(x_t)
 
         y = y_t.squeeze().numpy()
+        print(f"[BPInference] sigmoid_out range=[{float(np.min(y)):.6f}, {float(np.max(y)):.6f}]  "
+              f"y_min={self.y_min:.2f} y_max={self.y_max:.2f}")
         return y * self.y_rng + self.y_min
