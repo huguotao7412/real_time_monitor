@@ -158,58 +158,60 @@ class ResPath(nn.Module):
 # ===========================================================================
 
 class BPWaveformNet(nn.Module):
-    """MultiResUNet + RAMS attention + ASPP bridge.
+    """MultiResUNet + optional RAMS attention + ASPP bridge.
 
-    Matches Stage1_Waveform_Net_Safe_V7_ALLMAXMIN.mat actual trained weights.
+    RAMS attention (9 gates across encoder/decoder/bridge) can be disabled
+    for inference-only use where simpler forward pass is preferred.
     """
 
-    def __init__(self):
+    def __init__(self, use_rams: bool = False):
         super().__init__()
+        self._use_rams = use_rams
 
         self.input_proj = nn.Conv1d(1, 32, 1)
 
         # --- Encoder (4 levels) ---
         self.enc1 = MultiResBlock(32, 64)
-        self.rams1 = RAMSAttention(64)
+        self.rams1 = RAMSAttention(64) if use_rams else nn.Identity()
         self.pool1 = nn.MaxPool1d(2, 2)
 
         self.enc2 = MultiResBlock(64, 128)
-        self.rams2 = RAMSAttention(128)
+        self.rams2 = RAMSAttention(128) if use_rams else nn.Identity()
         self.pool2 = nn.MaxPool1d(2, 2)
 
         self.enc3 = MultiResBlock(128, 256)
-        self.rams3 = RAMSAttention(256)
+        self.rams3 = RAMSAttention(256) if use_rams else nn.Identity()
         self.pool3 = nn.MaxPool1d(2, 2)
 
         self.enc4 = MultiResBlock(256, 512)
-        self.rams4 = RAMSAttention(512)
+        self.rams4 = RAMSAttention(512) if use_rams else nn.Identity()
         self.pool4 = nn.MaxPool1d(2, 2)
 
         # --- Bridge ---
         self.bridge_base = MultiResBlock(512, 1024)
-        self.rams_bridge = RAMSAttention(1024)
+        self.rams_bridge = RAMSAttention(1024) if use_rams else nn.Identity()
         self.bridge_aspp = ASPPBridge(1024, 256)
 
         # --- Decoder ---
         self.up4 = nn.ConvTranspose1d(1024, 512, 2, 2)
         self.res4 = ResPath(512, 256, 1)
         self.dec4 = MultiResBlock(512 + 256, 512)
-        self.rams_dec4 = RAMSAttention(512)
+        self.rams_dec4 = RAMSAttention(512) if use_rams else nn.Identity()
 
         self.up3 = nn.ConvTranspose1d(512, 256, 2, 2)
         self.res3 = ResPath(256, 128, 2)
         self.dec3 = MultiResBlock(256 + 128, 256)
-        self.rams_dec3 = RAMSAttention(256)
+        self.rams_dec3 = RAMSAttention(256) if use_rams else nn.Identity()
 
         self.up2 = nn.ConvTranspose1d(256, 128, 2, 2)
         self.res2 = ResPath(128, 64, 3)
         self.dec2 = MultiResBlock(128 + 64, 128)
-        self.rams_dec2 = RAMSAttention(128)
+        self.rams_dec2 = RAMSAttention(128) if use_rams else nn.Identity()
 
         self.up1 = nn.ConvTranspose1d(128, 64, 2, 2)
         self.res1 = ResPath(64, 32, 4)
         self.dec1 = MultiResBlock(64 + 32, 64)
-        self.rams_dec1 = RAMSAttention(64)
+        self.rams_dec1 = RAMSAttention(64) if use_rams else nn.Identity()
 
         # --- Output ---
         self.final_conv = nn.Conv1d(64, 1, 1)
@@ -218,24 +220,24 @@ class BPWaveformNet(nn.Module):
     def forward(self, x):
         x = self.input_proj(x)
 
-        e1 = self.rams1(self.enc1(x))
-        e2 = self.rams2(self.enc2(self.pool1(e1)))
-        e3 = self.rams3(self.enc3(self.pool2(e2)))
-        e4 = self.rams4(self.enc4(self.pool3(e3)))
+        e1 = self.enc1(x)
+        e2 = self.enc2(self.pool1(self.rams1(e1)))
+        e3 = self.enc3(self.pool2(self.rams2(e2)))
+        e4 = self.enc4(self.pool3(self.rams3(e3)))
 
         b = self.bridge_aspp(self.rams_bridge(
             self.bridge_base(self.pool4(e4))))
 
-        d4 = self.rams_dec4(self.dec4(
-            torch.cat([self.up4(b), self.res4(e4)], 1)))
-        d3 = self.rams_dec3(self.dec3(
-            torch.cat([self.up3(d4), self.res3(e3)], 1)))
-        d2 = self.rams_dec2(self.dec2(
-            torch.cat([self.up2(d3), self.res2(e2)], 1)))
-        d1 = self.rams_dec1(self.dec1(
-            torch.cat([self.up1(d2), self.res1(e1)], 1)))
+        d4 = self.dec4(
+            torch.cat([self.up4(b), self.res4(e4)], 1))
+        d3 = self.dec3(
+            torch.cat([self.up3(self.rams_dec4(d4)), self.res3(e3)], 1))
+        d2 = self.dec2(
+            torch.cat([self.up2(self.rams_dec3(d3)), self.res2(e2)], 1))
+        d1 = self.dec1(
+            torch.cat([self.up1(self.rams_dec2(d2)), self.res1(e1)], 1))
 
-        return self.sigmoid(self.final_conv(d1))
+        return self.sigmoid(self.final_conv(self.rams_dec1(d1)))
 
 
 # ===========================================================================
@@ -334,11 +336,12 @@ def _respath(all_p, sd, pt, ml, n):
 # Main loader
 # ===========================================================================
 
-def load_bp_network(weights_path: str) -> BPWaveformNet:
+def load_bp_network(weights_path: str, use_rams: bool = False) -> BPWaveformNet:
     """Create BPWaveformNet and load MATLAB-extracted weights.
 
     Args:
         weights_path: Path to bp_weights.mat (from extract_weights.m)
+        use_rams: If False, skip RAMS attention weights (Identity layers)
 
     Returns:
         BPWaveformNet in eval mode with all weights loaded.
@@ -350,7 +353,7 @@ def load_bp_network(weights_path: str) -> BPWaveformNet:
     if st and hasattr(st, "keys"):
         all_p.update(st)
 
-    model = BPWaveformNet()
+    model = BPWaveformNet(use_rams=use_rams)
     sd = model.state_dict()
 
     # Input projection (Conv1d(1->32,1) - weight squeezed to (32,))
@@ -361,39 +364,39 @@ def load_bp_network(weights_path: str) -> BPWaveformNet:
 
     # Encoder
     _mrb(all_p, sd, "enc1", "enc1")
-    _rams(all_p, sd, "rams1", "rams1")
+    if use_rams: _rams(all_p, sd, "rams1", "rams1")
     _mrb(all_p, sd, "enc2", "enc2")
-    _rams(all_p, sd, "rams2", "rams2")
+    if use_rams: _rams(all_p, sd, "rams2", "rams2")
     _mrb(all_p, sd, "enc3", "enc3")
-    _rams(all_p, sd, "rams3", "rams3")
+    if use_rams: _rams(all_p, sd, "rams3", "rams3")
     _mrb(all_p, sd, "enc4", "enc4")
-    _rams(all_p, sd, "rams4", "rams4")
+    if use_rams: _rams(all_p, sd, "rams4", "rams4")
 
     # Bridge
     _mrb(all_p, sd, "bridge_base", "bridge_base")
-    _rams(all_p, sd, "rams_bridge", "rams_bridge")
+    if use_rams: _rams(all_p, sd, "rams_bridge", "rams_bridge")
     _aspp(all_p, sd, "bridge_aspp", "bridge_aspp")
 
     # Decoder
     _tconv(all_p, sd, "up4", "up4")
     _respath(all_p, sd, "res4", "res4", 1)
     _mrb(all_p, sd, "dec4", "dec4")
-    _rams(all_p, sd, "rams_dec4", "rams_dec4")
+    if use_rams: _rams(all_p, sd, "rams_dec4", "rams_dec4")
 
     _tconv(all_p, sd, "up3", "up3")
     _respath(all_p, sd, "res3", "res3", 2)
     _mrb(all_p, sd, "dec3", "dec3")
-    _rams(all_p, sd, "rams_dec3", "rams_dec3")
+    if use_rams: _rams(all_p, sd, "rams_dec3", "rams_dec3")
 
     _tconv(all_p, sd, "up2", "up2")
     _respath(all_p, sd, "res2", "res2", 3)
     _mrb(all_p, sd, "dec2", "dec2")
-    _rams(all_p, sd, "rams_dec2", "rams_dec2")
+    if use_rams: _rams(all_p, sd, "rams_dec2", "rams_dec2")
 
     _tconv(all_p, sd, "up1", "up1")
     _respath(all_p, sd, "res1", "res1", 4)
     _mrb(all_p, sd, "dec1", "dec1")
-    _rams(all_p, sd, "rams_dec1", "rams_dec1")
+    if use_rams: _rams(all_p, sd, "rams_dec1", "rams_dec1")
 
     # Output (Conv1d(64->1,1) - weight squeezed to (64,), bias is scalar)
     sd["final_conv.weight"] = torch.from_numpy(
@@ -401,7 +404,7 @@ def load_bp_network(weights_path: str) -> BPWaveformNet:
     fb = all_p["final_conv__Bias"]
     sd["final_conv.bias"] = torch.tensor([float(fb)])
 
-    model.load_state_dict(sd, strict=True)
+    model.load_state_dict(sd, strict=use_rams)
     model.eval()
     return model
 
@@ -418,7 +421,7 @@ class BPInference:
         waveform_mmhg = bp.predict(pulse_wave_256)  # np[256] -> np[256] in mmHg
     """
 
-    def __init__(self, weights_path: str):
+    def __init__(self, weights_path: str, use_rams: bool = False):
         mat = loadmat(weights_path, simplify_cells=True)
         self.x_min = float(mat["x_min"])
         self.x_max = float(mat["x_max"])
@@ -426,7 +429,7 @@ class BPInference:
         self.y_max = float(mat["y_max"])
         self.x_rng = (self.x_max - self.x_min) + 1e-8
         self.y_rng = self.y_max - self.y_min
-        self.model = load_bp_network(weights_path)
+        self.model = load_bp_network(weights_path, use_rams=use_rams)
 
         # Sanity check: verify output is not NaN on zero input
         zero_out = self.predict(np.zeros(256, dtype=np.float32))
@@ -447,15 +450,10 @@ class BPInference:
         """
         x = np.asarray(wave_256, dtype=np.float32)
         x_norm = (x - self.x_min) / self.x_rng
-        print(f"[BPInference] input range=[{float(np.min(x)):.4f}, {float(np.max(x)):.4f}]  "
-              f"x_min={self.x_min:.4f} x_max={self.x_max:.4f}  "
-              f"norm_range=[{float(np.min(x_norm)):.4f}, {float(np.max(x_norm)):.4f}]")
         x_t = torch.from_numpy(x_norm).unsqueeze(0).unsqueeze(0)
 
         with torch.no_grad():
             y_t = self.model(x_t)
 
         y = y_t.squeeze().numpy()
-        print(f"[BPInference] sigmoid_out range=[{float(np.min(y)):.6f}, {float(np.max(y)):.6f}]  "
-              f"y_min={self.y_min:.2f} y_max={self.y_max:.2f}")
         return y * self.y_rng + self.y_min
