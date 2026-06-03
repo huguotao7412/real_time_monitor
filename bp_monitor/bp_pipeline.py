@@ -169,6 +169,8 @@ class BPPipeline:
             self._complex_buffer.clear()
             return
 
+        print(f"[BPPipeline] 2D CFAR confirmed {len(target_bins)} target(s): "
+              f"bins={list(target_bins)}")
         target_bin = int(target_bins[0])
         # Update target bin if CFAR found a better one
         if target_bin != self._target_bin:
@@ -206,9 +208,13 @@ class BPPipeline:
             input_seq = np.pad(wave_50hz, (self.N_INPUT - len(wave_50hz), 0))
 
         # ---- Step 7: Network inference ----
+        print(f"[BPPipeline] phase_range={phase_range:.4f}  "
+              f"clean_range={float(np.max(clean)-np.min(clean)):.4f}")
         bp_waveform = self._bp.predict(input_seq.astype(np.float32))
 
         # ---- Step 8: SBP / DBP extraction ----
+        print(f"[BPPipeline] net_out range=[{float(np.min(bp_waveform)):.2f}, "
+              f"{float(np.max(bp_waveform)):.2f}] mmHg")
         sbp, dbp, info = extract_bp(bp_waveform, fs=self.FS_TARGET)
 
         # ---- Step 9: Push result ----

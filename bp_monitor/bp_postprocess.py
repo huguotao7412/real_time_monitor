@@ -16,8 +16,8 @@ def extract_bp(
       - prominence >= max(2.0, 0.05 * range)
       - min peak distance = round(50 * 0.5) = 25 samples
       - need >= 3 peaks AND >= 3 valleys
-      - SBP = mean(sorted(peaks)[1:-1]) - 10  (trim extremes, empirical correction)
-      - DBP = mean(sorted(valleys)[1:-1]) - 20
+      - SBP = max(sort(peaks)(2:end-1)) - 10  (trim extremes, take max)
+      - DBP = min(sort(valleys)(2:end-1)) - 20  (trim extremes, take min)
 
     Args:
         waveform_mmhg: 256-point BP waveform in mmHg (50 Hz sampling)
@@ -46,21 +46,21 @@ def extract_bp(
         "confidence": 0.0,
     }
 
+    print(f"[extract_bp] wf_range={wf_range:.2f} mmHg  "
+          f"peaks={len(peaks)}  valleys={len(valleys)}  "
+          f"prom={prom:.2f}")
+
     if len(peaks) < 3 or len(valleys) < 3:
+        print(f"[extract_bp] FAIL: need >=3 peaks and >=3 valleys")
         return np.nan, np.nan, info
 
-    # Trim extremes, compute means, apply empirical corrections
+    # MATLAB: pks_sorted = sort(pks, 'ascend'); SBP = max(pks_sorted(2:end-1)) - 10
     pks_sorted = np.sort(wf[peaks])
-    if len(pks_sorted) >= 5:
-        sbp = float(np.mean(pks_sorted[1:-1]) - 10.0)
-    else:
-        sbp = float(np.mean(pks_sorted) - 10.0)
+    sbp = float(np.max(pks_sorted[1:-1]) - 10.0)
 
+    # MATLAB: vlys_sorted = sort(vlys, 'ascend'); DBP = min(vlys_sorted(2:end-1)) - 20
     vlys_sorted = np.sort(wf[valleys])
-    if len(vlys_sorted) >= 5:
-        dbp = float(np.mean(vlys_sorted[1:-1]) - 20.0)
-    else:
-        dbp = float(np.mean(vlys_sorted) - 20.0)
+    dbp = float(np.min(vlys_sorted[1:-1]) - 20.0)
 
     info["confidence"] = min(1.0, min(len(peaks), len(valleys)) / 10.0)
 
