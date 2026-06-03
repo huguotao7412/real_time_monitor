@@ -1,7 +1,6 @@
 """Blood pressure monitoring tab — large SBP/DBP numbers + scrolling waveform."""
 
 import time
-from collections import deque
 
 import numpy as np
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame
@@ -82,7 +81,6 @@ class BPTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._last_update_time = time.time()
-        self._wave_buffer: deque[float] = deque(maxlen=1200)
 
         self._setup_ui()
 
@@ -170,15 +168,10 @@ class BPTab(QWidget):
         self._sbp_panel.set_value(r.sbp)
         self._dbp_panel.set_value(r.dbp)
 
-        # Waveform: downsample 256 -> 60 points, append to rolling buffer
+        # Waveform: show latest 256-point BP waveform directly (5.12s at 50Hz)
         wf = r.bp_waveform
-        if wf.size >= 60:
-            indices = np.linspace(0, wf.size - 1, 60, dtype=int)
-            chunk = wf[indices]
-        else:
-            chunk = wf
-        self._wave_buffer.extend(float(v) for v in chunk)
-        self._wave.set_data(np.array(self._wave_buffer, dtype=np.float32))
+        if wf.size > 0:
+            self._wave.set_data(wf.astype(np.float32))
 
         # Info bar
         if not np.isnan(r.target_distance_m):
@@ -197,7 +190,6 @@ class BPTab(QWidget):
         """Clear all BP values to '--' state."""
         self._sbp_panel.set_value(float('nan'))
         self._dbp_panel.set_value(float('nan'))
-        self._wave_buffer.clear()
         self._wave.set_data(np.array([], dtype=np.float32))
         self._dist_label.setText("Distance: --")
         self._conf_dots.set_confidence(0.0)
