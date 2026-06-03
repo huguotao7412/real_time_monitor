@@ -116,6 +116,16 @@ class ResearchTab(QWidget):
     def start(self) -> None:
         self._trend.start()
 
+    def reset_display(self) -> None:
+        """Clear all displayed values to default state."""
+        self._breath_bpm_label.setText("--")
+        self._heart_bpm_label.setText("--")
+        self._breath_wave.set_data(np.array([], dtype=np.float32))
+        self._heart_wave.set_data(np.array([], dtype=np.float32))
+        self._sqi.set_level(0.0, 0.0)
+        self._trend.start()
+        self._debug_panel.clear()
+
     def update_display(
         self,
         breath_bpm: float,
