@@ -428,6 +428,14 @@ class BPInference:
         self.y_rng = self.y_max - self.y_min
         self.model = load_bp_network(weights_path)
 
+        # Sanity check: verify output is not NaN on zero input
+        zero_out = self.predict(np.zeros(256, dtype=np.float32))
+        if np.any(np.isnan(zero_out)):
+            raise RuntimeError(
+                "BP network sanity check failed: NaN in output. "
+                "Check weight loading or bp_weights.mat integrity."
+            )
+
     def predict(self, wave_256: np.ndarray) -> np.ndarray:
         """Run inference on a 256-point pulse wave.
 
