@@ -8,6 +8,7 @@ Pipeline:
 import numpy as np
 from PyEMD import EMD
 import pywt
+from scipy.signal import periodogram
 
 
 def clean_pulse_wave(raw_phase: np.ndarray, fs: float = 200.0) -> np.ndarray:
@@ -55,10 +56,9 @@ def _remove_harmonics(signal: np.ndarray, fs: float) -> np.ndarray:
     imf_corrs = np.zeros(n_imfs)
     for i in range(n_imfs):
         imf = imfs[i]
-        mag = np.abs(np.fft.rfft(imf))
-        freqs = np.fft.rfftfreq(n, 1.0 / fs)
-        if len(mag) > 0:
-            imf_freqs[i] = freqs[np.argmax(mag)]
+        freqs, psd = periodogram(imf, fs, nfft=n)
+        if len(psd) > 0:
+            imf_freqs[i] = freqs[np.argmax(psd)]
         corr = np.corrcoef(signal, imf)[0, 1]
         imf_corrs[i] = 0.0 if np.isnan(corr) else corr
 
@@ -109,13 +109,17 @@ def _wavelet_denoise(signal: np.ndarray, fs: float) -> np.ndarray:
     # Zero approximation (baseline drift)
     coeffs[0] = np.zeros_like(coeffs[0])
 
-    # Reconstruct from detail levels D_level-3 .. D_level only
+    # MATLAB reconstructs D_level-3 .. D_level (coarser, lower-freq details).
+    # PyWavelets coeffs: [cA_n, cD_n, cD_{n-1}, ..., cD_1]
+    # MATLAB detail level m maps to PyWavelets index: level - m + 1
+    # e.g. level=8: D5→coeffs[4], D6→coeffs[3], D7→coeffs[2], D8→coeffs[1]
     result = np.zeros(n)
-    start = max(1, level - 3)
-    for i in range(start, min(level + 1, len(coeffs))):
+    matlab_start = max(1, level - 3)
+    for m_level in range(matlab_start, level + 1):
+        py_idx = level - m_level + 1
         single = [np.zeros_like(c) for c in coeffs]
         single[0] = np.zeros_like(coeffs[0])
-        single[i] = coeffs[i]
+        single[py_idx] = coeffs[py_idx]
         result += pywt.waverec(single, "sym8")[:n]
 
     return result
