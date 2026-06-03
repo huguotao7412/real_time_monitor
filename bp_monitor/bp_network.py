@@ -56,46 +56,58 @@ class MultiResBlock(nn.Module):
 class RAMSAttention(nn.Module):
     """RAMS: Range-Aware Multi-pooling Spatial-Channel attention.
 
-    Spatial:  channel-mean -> Conv(1->2,7) -> softmax -> mean -> (B,1,L) gate
-    Channel:  AvgPool, MaxPool, Range each through
-              FC(in->in/16->in) -> summed -> sigmoid -> (B,C,1) gate
-    Output = x * channel_gate * spatial_gate
+    Strictly matches MATLAB addOptimizedRAMSBlock in build_BP_Stage1_Model6.m:
+
+    Channel attention:
+      GMP (global max pool) + GAP (global avg pool) + GMIN (global min)
+      Range = GMP - GMIN
+      3-branch MLP: max/gap/rng each through FC(C→C/16→C)
+      Sum → Sigmoid → channel gate → x_ch = x * gate
+
+    Spatial attention (on channel-scaled features):
+      Channel-wise avg + max → concat(2) → Conv1d(2→1, 7) → Sigmoid
+      NOT softmax!
     """
 
     def __init__(self, channels: int):
         super().__init__()
         r = max(2, channels // 16)
 
-        # Spatial conv operates on channel-pooled features: Conv1d(1, 2, 7)
-        # MATLAB weight stored as [k=7, out=2] -> 2D (7, 2)
-        self.sp_conv = nn.Conv1d(1, 2, 7, padding=3)
-
-        self.mlp_avg_1 = nn.Conv1d(channels, r, 1)
-        self.mlp_avg_2 = nn.Conv1d(r, channels, 1)
+        # Channel attention MLPs (3 branches)
         self.mlp_max_1 = nn.Conv1d(channels, r, 1)
         self.mlp_max_2 = nn.Conv1d(r, channels, 1)
+        self.mlp_avg_1 = nn.Conv1d(channels, r, 1)
+        self.mlp_avg_2 = nn.Conv1d(r, channels, 1)
         self.mlp_rng_1 = nn.Conv1d(channels, r, 1)
         self.mlp_rng_2 = nn.Conv1d(r, channels, 1)
+
+        # Spatial attention: Conv1d(in=2, out=1, kernel=7)
+        # MATLAB weight [k=7, in=2] with out=1 implicit
+        self.sp_conv = nn.Conv1d(2, 1, 7, padding=3)
 
         self.relu = nn.ReLU(inplace=True)
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
-        # Spatial gate: pool channels -> conv -> softmax -> average 2 outputs
-        x_pooled = x.mean(dim=1, keepdim=True)            # (B, 1, L)
-        sp = torch.softmax(self.sp_conv(x_pooled), dim=-1)  # (B, 2, L)
-        sp = sp.mean(dim=1, keepdim=True)                 # (B, 1, L)
+        # --- Channel attention ---
+        gmp = x.max(dim=-1, keepdim=True).values        # global max pool
+        gap = x.mean(dim=-1, keepdim=True)              # global avg pool
+        gmin = x.min(dim=-1, keepdim=True).values       # global min
+        rng = gmp - gmin                                 # range = max - min
 
-        # Channel gate: three pooling strategies
-        gap = x.mean(dim=-1, keepdim=True)
-        gmp = x.max(dim=-1, keepdim=True).values
-        rng = (x.max(dim=-1).values - x.min(dim=-1).values).unsqueeze(-1)
-
-        ch = (self.mlp_avg_2(self.relu(self.mlp_avg_1(gap))) +
-              self.mlp_max_2(self.relu(self.mlp_max_1(gmp))) +
+        ch = (self.mlp_max_2(self.relu(self.mlp_max_1(gmp))) +
+              self.mlp_avg_2(self.relu(self.mlp_avg_1(gap))) +
               self.mlp_rng_2(self.relu(self.mlp_rng_1(rng))))
         ch = self.sigmoid(ch)
-        return x * ch * sp
+        x_ch = x * ch  # channel-scaled features
+
+        # --- Spatial attention (on channel-scaled features) ---
+        avg_ch = x_ch.mean(dim=1, keepdim=True)          # (B, 1, L)
+        max_ch = x_ch.max(dim=1, keepdim=True).values    # (B, 1, L)
+        cat_ch = torch.cat([avg_ch, max_ch], dim=1)      # (B, 2, L)
+        sp = self.sigmoid(self.sp_conv(cat_ch))          # (B, 1, L) — sigmoid!
+
+        return x_ch * sp
 
 
 class ASPPBridge(nn.Module):
@@ -164,7 +176,7 @@ class BPWaveformNet(nn.Module):
     for inference-only use where simpler forward pass is preferred.
     """
 
-    def __init__(self, use_rams: bool = False):
+    def __init__(self, use_rams: bool = True):
         super().__init__()
         self._use_rams = use_rams
 
@@ -259,9 +271,8 @@ def _t_tconv(w: np.ndarray) -> np.ndarray:
 
 
 def _t_spconv(w: np.ndarray) -> np.ndarray:
-    """MATLAB sp_conv weight [k=7,out=2] (in=1 implicit) -> PyTorch [2,1,7]."""
-    # (7, 2) -> (7, 1, 2) -> (2, 1, 7)
-    return w.reshape(7, 1, 2).transpose(2, 1, 0).copy()
+    """MATLAB sp_conv weight [k=7, in=2] (out=1 implicit) -> PyTorch [1, 2, 7]."""
+    return w.reshape(1, w.shape[1], w.shape[0]).copy()
 
 
 def _s(v: np.ndarray) -> np.ndarray:
@@ -303,9 +314,9 @@ def _rams(all_p, sd, pt, ml):
     w_key = f"{ml}_P_Sp_conv7__Weights"
     b_key = f"{ml}_P_Sp_conv7__Bias"
     sd[f"{pt}.sp_conv.weight"] = torch.from_numpy(_t_spconv(all_p[w_key]))
-    # Bias is a scalar float -> broadcast to [2]
+    # Bias is a scalar float -> [1] for Conv1d(2->1, 7)
     sd[f"{pt}.sp_conv.bias"] = torch.tensor(
-        [float(all_p[b_key])] * 2, dtype=torch.float32)
+        [float(all_p[b_key])], dtype=torch.float32)
     for pool in ["Avg", "Max", "Rng"]:
         p = pool.lower()
         _conv(all_p, sd, f"{pt}.mlp_{p}_1", f"{ml}_P_Ch_mlp{pool}1")
@@ -421,7 +432,7 @@ class BPInference:
         waveform_mmhg = bp.predict(pulse_wave_256)  # np[256] -> np[256] in mmHg
     """
 
-    def __init__(self, weights_path: str, use_rams: bool = False):
+    def __init__(self, weights_path: str, use_rams: bool = True):
         mat = loadmat(weights_path, simplify_cells=True)
         self.x_min = float(mat["x_min"])
         self.x_max = float(mat["x_max"])
