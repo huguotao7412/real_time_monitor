@@ -324,25 +324,10 @@ class MainWindow(QMainWindow):
                 frames = self._uart_parser.feed(raw)
                 for fft_data in frames:
                     self._frame_count += 1
+                    frame = self._build_radar_frame(fft_data)
                     if self._bp_mode:
-                        cube = fft_data.reshape(1, 1, 32)
-                        rx_combined = cube[0, 0, :]
-                        frame = RadarFrame(
-                            timestamp=time.time(),
-                            frame_index=self._frame_count,
-                            header=FrameHeader(0, 1, 1, 1, 60000, 32, 1, 160, 50, 0, 0, 0, 5),
-                            data_cube=rx_combined.reshape(32, 1, 1),
-                        )
                         target_queue = self._bp_pipeline.raw_queue
                     else:
-                        cube = fft_data.reshape(2, 4, 128)
-                        rx_combined = np.mean(cube[0, :, :], axis=0)
-                        frame = RadarFrame(
-                            timestamp=time.time(),
-                            frame_index=self._frame_count,
-                            header=FrameHeader(0, 1, 4, 2, 58000, 128, 1, 3000, 25, 1920, 60),
-                            data_cube=rx_combined.reshape(-1, 1, 1),
-                        )
                         target_queue = self._pipeline.raw_queue
                     while True:
                         try:
@@ -356,6 +341,33 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 print(f"[Serial I/O] {e}")
                 time.sleep(0.5)
+
+    def _build_bp_frame(self, fft_data: np.ndarray) -> RadarFrame:
+        """Build a RadarFrame from raw FFT data in BP mode (1T1R, 32 bins)."""
+        rx_combined = fft_data.ravel()[:32]
+        return RadarFrame(
+            timestamp=time.time(),
+            frame_index=self._frame_count,
+            header=FrameHeader(0, 1, 1, 1, 60000, 32, 1, 160, 50, 0, 0, 0, 5),
+            data_cube=rx_combined.reshape(32, 1, 1),
+        )
+
+    def _build_hr_frame(self, fft_data: np.ndarray) -> RadarFrame:
+        """Build a RadarFrame from raw FFT data in HR mode (2T4R, 128 bins)."""
+        cube = fft_data.reshape(2, 4, -1)
+        rx_combined = np.mean(cube[0, :, :], axis=0)
+        return RadarFrame(
+            timestamp=time.time(),
+            frame_index=self._frame_count,
+            header=FrameHeader(0, 1, 4, 2, 58000, 128, 1, 3000, 25, 1920, 60),
+            data_cube=rx_combined.reshape(-1, 1, 1),
+        )
+
+    def _build_radar_frame(self, fft_data: np.ndarray) -> RadarFrame:
+        """Build RadarFrame for current mode (BP or HR)."""
+        if self._bp_mode:
+            return self._build_bp_frame(fft_data)
+        return self._build_hr_frame(fft_data)
 
     def _start_replay(self) -> None:
         if not self._replay_file or not os.path.exists(self._replay_file):
@@ -402,13 +414,7 @@ class MainWindow(QMainWindow):
                 self._select_btn.setEnabled(True)
             return
         self._frame_count += 1
-        cube = frames[0].reshape(-1, 1, 1)
-        frame = RadarFrame(
-            timestamp=time.time(),
-            frame_index=self._frame_count,
-            header=FrameHeader(0, 1, 1, 1, 58000, 128, 0, 3000, 25, 1920, 60),
-            data_cube=cube,
-        )
+        frame = self._build_radar_frame(frames[0])
         while True:
             try:
                 self._pipeline.raw_queue.put_nowait(frame)
@@ -456,22 +462,20 @@ class MainWindow(QMainWindow):
             tr("btn_mode_hr") if self._bp_mode else tr("btn_mode_bp")
         )
 
-        # 7. Reboot radar in new mode (no reconnect needed)
-        if self._bp_mode:
-            self._radar_mgr.boot_bp()
-        else:
-            self._radar_mgr.boot()
-
-        # 8. Start new pipeline
-        if self._bp_mode:
-            from bp_monitor.bp_pipeline import BPPipeline
-            self._bp_pipeline = BPPipeline("bp_matlab/bp_weights.mat")
-            self._bp_pipeline.start()
-            self._latest_vitals = None
-        else:
-            self._pipeline = Pipeline()
-            self._pipeline.start()
-            self._latest_bp_result = None
+        # 7-8. If was running, restart radar + pipeline in new mode.
+        # If not running, defer to _on_serial_start.
+        if was_running:
+            if self._bp_mode:
+                self._radar_mgr.boot_bp()
+                from bp_monitor.bp_pipeline import BPPipeline
+                self._bp_pipeline = BPPipeline("bp_matlab/bp_weights.mat")
+                self._bp_pipeline.start()
+                self._latest_vitals = None
+            else:
+                self._radar_mgr.boot()
+                self._pipeline = Pipeline()
+                self._pipeline.start()
+                self._latest_bp_result = None
 
         # 9. Restart I/O if was running
         if was_running:
