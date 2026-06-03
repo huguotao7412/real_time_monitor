@@ -274,3 +274,85 @@ class HRMode(MonitorMode):
         self._sqi_history.clear()
         self._latest_vitals = None
         self._trend_tick_counter = 0
+
+
+class BPMode(MonitorMode):
+    """Blood pressure monitoring mode (1T1R, 32 range bins)."""
+
+    def __init__(self):
+        self._pipeline = None  # type: ignore  # BPPipeline
+        self._latest_bp_result = None  # type: ignore  # BPResult
+        self._bp_results: list = []
+
+    # -- MonitorMode impl ------------------------------------------------
+
+    @property
+    def uart_bins(self) -> int:
+        return 32
+
+    def boot_radar(self, radar_mgr) -> bool:
+        return radar_mgr.boot_bp()
+
+    def build_frame(self, fft_data: np.ndarray, frame_index: int) -> RadarFrame:
+        """Build BP frame: 1T1R, 32 range bins."""
+        rx_combined = fft_data.ravel()[:32]
+        return RadarFrame(
+            timestamp=time.time(),
+            frame_index=frame_index,
+            header=FrameHeader(0, 1, 1, 1, 60000, 32, 1, 160, 50, 0, 0, 0, 5),
+            data_cube=rx_combined.reshape(32, 1, 1),
+        )
+
+    def start(self) -> None:
+        from bp_monitor.bp_pipeline import BPPipeline
+        self._pipeline = BPPipeline("bp_matlab/bp_weights.mat")
+        self._pipeline.start()
+
+    def stop(self) -> None:
+        if self._pipeline:
+            _drain_queue(self._pipeline.display_queue)
+            self._pipeline.stop()
+            self._pipeline = None
+
+    def feed_frame(self, frame: RadarFrame) -> None:
+        if self._pipeline is None:
+            return
+        while True:
+            try:
+                self._pipeline.raw_queue.put_nowait(frame)
+                break
+            except queue.Full:
+                try:
+                    self._pipeline.raw_queue.get_nowait()
+                except queue.Empty:
+                    pass
+
+    def poll_and_update(self, subject_tab, bp_tab, research_tab,
+                        status_label, elapsed_label, frame_rate_label,
+                        start_time, frame_count) -> None:
+        if self._pipeline is None:
+            return
+
+        try:
+            while not self._pipeline.display_queue.empty():
+                self._latest_bp_result = self._pipeline.display_queue.get_nowait()
+        except queue.Empty:
+            pass
+
+        if self._latest_bp_result is not None:
+            bp_tab.update_display(self._latest_bp_result)
+            self._bp_results.append(self._latest_bp_result)
+            status_label.setText("● Monitoring")
+            status_label.setStyleSheet("color: #27ae60;")
+
+    def tab_visibility(self) -> tuple[bool, bool, bool]:
+        return (False, True, False)
+
+    def get_export_data(self) -> dict:
+        return {
+            "bp_results": list(self._bp_results),
+        }
+
+    def clear_data(self) -> None:
+        self._bp_results.clear()
+        self._latest_bp_result = None
