@@ -205,7 +205,7 @@ def estimate_bpm_stft(
     Returns:
         (breath_bpm, heart_bpm)
     """
-    from scipy.signal import stft, detrend
+    from scipy.signal import stft
 
     n = len(breath_signal)
     if n < 64:
@@ -216,7 +216,7 @@ def estimate_bpm_stft(
     breath_overlap = int(breath_win * 0.8)
     nfft_b = max(n_fft, 2 ** int(np.ceil(np.log2(breath_win))))
 
-    breath_dt = detrend(breath_signal, type='linear')
+    breath_dt = _detrend_cubic(breath_signal)
     f_b, t_b, Zxx_b = stft(
         breath_dt, fs, window='hamming', nperseg=breath_win,
         noverlap=breath_overlap, nfft=nfft_b,
@@ -304,6 +304,15 @@ def _extract_bpm_from_stft(
         return float(np.mean(kf_trimmed)) * 60.0
     else:
         return float(np.mean(kf_trace)) * 60.0
+
+
+def _detrend_cubic(signal: np.ndarray) -> np.ndarray:
+    """Cubic polynomial detrend — matches MATLAB detrend(signal, 3)."""
+    n = len(signal)
+    t = np.arange(n)
+    coeffs = np.polyfit(t, signal, 3)
+    trend = np.polyval(coeffs, t)
+    return signal - trend
 
 
 def _kalman_filter_trace(

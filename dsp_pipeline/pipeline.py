@@ -13,6 +13,7 @@ from config.protocol import (
 from models.radar_frame import RadarFrame
 from dsp_pipeline.vital_signs import VitalSigns
 from dsp_pipeline.range_bin import find_best_range_bin
+from dsp_pipeline.cfar_2d import coarse_1d_cfar_candidates, adaptive_2d_cfar
 from dsp_pipeline.phase import extract_phase, unwrap_phase
 from dsp_pipeline.filters import remove_dc, VitalSignFilter
 from dsp_pipeline.fft_bpm import estimate_bpm, kalman_smooth, estimate_breath_bpm_time_domain, estimate_bpm_stft
@@ -40,6 +41,15 @@ class Pipeline:
         self._last_bpm_update = 0
         self.last_heartbeat = 0.0
 
+        # 2D-CFAR state (MATLAB adaptive_2d_cfar_findTargetBin)
+        self._cfar_accumulator: list[np.ndarray] = []
+        self._cfar_state: dict | None = None
+        self._cfar_rolling_buffer: deque[np.ndarray] = deque(maxlen=50)
+        self._cfar_initial_frames: int = 50
+        self._cfar_rescan_interval: int = 100  # ~5s at 20 Hz
+        self._current_bin_snr: float = 0.0
+        self.DISTANCE_PER_BIN: float = 0.05  # RS6240 range resolution
+
         # Feature toggles
         self._use_beamforming = use_beamforming
         self._use_advanced_dsp: bool = True  # Step 2: EMD + WPD + STFT
@@ -55,16 +65,10 @@ class Pipeline:
         # Kalman 追踪历史
         self._breath_history: list[float] = []
         self._heart_history: list[float] = []
+        self._breath_raw_history: deque[float] = deque(maxlen=5)  # 中值预滤波
+        self._heart_raw_history: deque[float] = deque(maxlen=5)
 
-        # 屏息状态机
-        self._apnea_threshold: float | None = 0.005  # 校准前默认值
-        self._calibration_samples: list[float] = []
-        self._calibration_done: bool = False
-        self._in_apnea: bool = False
-        self._apnea_start_time: float = 0.0
-        self._apnea_hold_breath: float = 0.0
-        self._apnea_hold_heart: float = 0.0
-        self._recovery_count: int = 0
+        # 弱信号计数 (用于 Range Bin 重捕获)
         self._low_signal_frame_count: int = 0
         self._last_valid_breath_bpm: float = 0.0
         self._last_valid_heart_bpm: float = 0.0
@@ -78,12 +82,11 @@ class Pipeline:
 
     @property
     def calibration_done(self) -> bool:
-        return self._calibration_done
+        return True
 
     @property
     def calibration_progress(self) -> float:
-        """0.0 - 1.0 fraction of calibration samples collected (target 200)."""
-        return min(1.0, len(self._calibration_samples) / 200.0)
+        return 1.0
 
     @property
     def best_range_bin(self) -> int | None:
@@ -112,6 +115,9 @@ class Pipeline:
             except Exception as e:
                 print(f"[DSP] Error: {e}")
 
+    # MUSIC/LCMV 通道选择: MATLAB 用 [1,2,5,6] (2T4R, 取前两个TX各前两个RX)
+    _MUSIC_CHANNELS = [0, 1, 4, 5]
+
     def _extract_rx_complex(self, data_cube: np.ndarray) -> np.ndarray:
         """Extract per-RX complex IQ at target range bin with +/-2 bin averaging.
 
@@ -122,16 +128,30 @@ class Pipeline:
         start_bin = max(1, self._best_bin - 2)
         end_bin = min(n_range - 1, self._best_bin + 2)
         rx_slice = data_cube[start_bin:end_bin + 1, 0, :]  # [n_bins, rx]
-        return np.mean(rx_slice, axis=0)  # [rx]
+        full_rx = np.mean(rx_slice, axis=0)  # [rx]
+        # Select channels [0,1,4,5] for MUSIC/LCMV (MATLAB [1,2,5,6])
+        if len(full_rx) > max(self._MUSIC_CHANNELS):
+            return full_rx[self._MUSIC_CHANNELS]
+        return full_rx
 
     def _process_frame(self, frame: RadarFrame) -> VitalSigns | None:
         data_cube = frame.data_cube
 
-        # 1. Range Bin 锁定 (CFAR, 前10帧)
+        # 1. Range Bin锁定 (2-stage CFAR: 1D coarse + 2D refinement)
+        self._cfar_rolling_buffer.append(data_cube)
+
         if self._best_bin is None:
-            self._best_bin = find_best_range_bin(data_cube, fs=FS_HZ)
-        if self._best_bin is None:
-            return None
+            self._cfar_accumulator.append(data_cube)
+            if len(self._cfar_accumulator) >= self._cfar_initial_frames:
+                self._best_bin, self._current_bin_snr = self._run_2d_cfar_lock()
+                self._cfar_accumulator.clear()
+            if self._best_bin is None:
+                return None
+        elif self._frame_count > 0 and self._frame_count % self._cfar_rescan_interval == 0:
+            new_bin, new_snr = self._run_2d_cfar_rescan()
+            if new_bin is not None and new_snr > self._current_bin_snr * 1.5:
+                self._best_bin = new_bin
+                self._current_bin_snr = new_snr
 
         # 2. Extract per-RX complex data and buffer
         rx_complex = None
@@ -161,6 +181,51 @@ class Pipeline:
 
         # 5. Shared downstream: detrend -> diff -> SOS -> BPM -> quality
         return self._shared_signal_chain(displacement, should_update_bpm)
+
+    def _build_mean_bin_frame_rx(self, cubes: list[np.ndarray]) -> np.ndarray:
+        """Concatenate frames → [bins, frames, rx] with background subtraction."""
+        bin_frame_rx = np.concatenate(cubes, axis=1)  # [bins, N, rx]
+        background = np.mean(bin_frame_rx, axis=1, keepdims=True)
+        return bin_frame_rx - background
+
+    def _run_2d_cfar_lock(self) -> tuple[int | None, float]:
+        """1D coarse + 2D refinement CFAR for initial target lock."""
+        mean_bin_frame_rx = self._build_mean_bin_frame_rx(self._cfar_accumulator)
+        candidates = coarse_1d_cfar_candidates(mean_bin_frame_rx)
+        final_bins, _, debug, self._cfar_state = adaptive_2d_cfar(
+            mean_bin_frame_rx, self.DISTANCE_PER_BIN, self._cfar_state, candidates
+        )
+        confirmed = debug.get("confirmed_list", np.array([]))
+        if len(confirmed) > 0:
+            best_idx = np.argmin(confirmed[:, 0])  # closest bin
+            best_bin = int(confirmed[best_idx, 0])
+            snr = float(confirmed[best_idx, 2])
+            return best_bin, snr
+        # Fallback: 1D CFAR only
+        if len(candidates) > 0:
+            return int(candidates[0]), 0.0
+        # Ultimate fallback
+        best_bin = find_best_range_bin(mean_bin_frame_rx, fs=FS_HZ)
+        return best_bin, 0.0
+
+    def _run_2d_cfar_rescan(self) -> tuple[int | None, float]:
+        """Periodic re-scan using rolling buffer. Returns (new_bin, snr) or (None, 0)."""
+        cubes = list(self._cfar_rolling_buffer)
+        if len(cubes) < 20:
+            return None, 0.0
+        mean_bin_frame_rx = self._build_mean_bin_frame_rx(cubes)
+        candidates = coarse_1d_cfar_candidates(mean_bin_frame_rx)
+        _, _, debug, _ = adaptive_2d_cfar(
+            mean_bin_frame_rx, self.DISTANCE_PER_BIN, self._cfar_state, candidates
+        )
+        confirmed = debug.get("confirmed_list", np.array([]))
+        if len(confirmed) > 0:
+            best_idx = np.argmin(confirmed[:, 0])
+            best_bin = int(confirmed[best_idx, 0])
+            snr = float(confirmed[best_idx, 2])
+            if best_bin != self._best_bin:
+                return best_bin, snr
+        return None, 0.0
 
     def _beamforming_path(self, update_angle: bool) -> np.ndarray | None:
         """Run MUSIC + LCMV on the RX buffer. Returns displacement [200] or None."""
@@ -272,39 +337,16 @@ class Pipeline:
         else:
             recent_phase_range = phase_range
 
-        # 自动校准屏息阈值
-        if not self._calibration_done and len(self._phase_buffer) >= WINDOW_SIZE:
-            self._calibration_samples.append(recent_phase_range)
-            if len(self._calibration_samples) >= 200:
-                arr = np.array(self._calibration_samples)
-                mean_val = float(np.mean(arr))
-                self._apnea_threshold = max(0.005, mean_val * 0.25)
-                self._calibration_done = True
-
-        # 屏息状态机：使用短时能量 recent_phase_range 进行判断
+        # 弱信号检测 → Range Bin 重捕获
         in_low_signal = (recent_phase_range < 0.005)
-        if self._calibration_done:
-            in_low_signal = in_low_signal or (recent_phase_range < self._apnea_threshold)
 
         if in_low_signal:
             self._low_signal_frame_count += 1
         else:
             self._low_signal_frame_count = 0
-            if self._in_apnea:
-                self._in_apnea = False
-                self._breath_history.clear()  # 恢复呼吸时清空历史，避免滞后
 
-        # Range bin re-acquisition on sustained low signal
         if self._low_signal_frame_count >= 30 and self._best_bin is not None:
             self._best_bin = None
-
-        # 连续 15 帧 (0.75秒) 平缓即触发屏息
-        if self._low_signal_frame_count >= 15 and not self._in_apnea:
-            self._in_apnea = True
-            self._apnea_start_time = time.time()
-            self._breath_history.clear()  # 刚进入屏息时清空历史
-
-        # ⚠️ 注意：这里不要提前 return！让程序继续往下走，去计算真实的心率
 
         # BPM 估计
         breath_bpm = self._last_valid_breath_bpm
@@ -321,6 +363,32 @@ class Pipeline:
                     heart_signal_display = adv_heart
                     breath_bpm = adv_breath_bpm
                     heart_bpm = adv_heart_bpm
+
+                    # 中值预滤波 + Kalman 平滑 (与回退路径统一)
+                    if breath_bpm > 0:
+                        self._breath_raw_history.append(breath_bpm)
+                        breath_bpm_median = float(
+                            np.median(list(self._breath_raw_history))
+                        )
+                        self._breath_history.append(breath_bpm_median)
+                        if len(self._breath_history) > 15:
+                            self._breath_history = self._breath_history[-15:]
+                        breath_bpm = kalman_smooth(
+                            self._breath_history, q=5e-3, r=0.3
+                        )
+
+                    if heart_bpm > 0:
+                        self._heart_raw_history.append(heart_bpm)
+                        heart_bpm_median = float(
+                            np.median(list(self._heart_raw_history))
+                        )
+                        self._heart_history.append(heart_bpm_median)
+                        if len(self._heart_history) > 15:
+                            self._heart_history = self._heart_history[-15:]
+                        heart_bpm = kalman_smooth(
+                            self._heart_history, q=1e-3, r=0.5
+                        )
+
                     if breath_bpm > 0:
                         self._last_valid_breath_bpm = breath_bpm
                     if heart_bpm > 0:
@@ -366,18 +434,15 @@ class Pipeline:
 
         quality = self._check_quality(enhanced)
 
-        # ⚠️ 【最核心的修改】：在最终打包输出前拦截！
-        # 如果判定为屏息，强制将呼吸率 (breath_bpm) 设为 0。
-        # 但是！完全保留刚刚算出来的真实心率 (heart_bpm) 以及真实的心率波形！
-        if self._in_apnea:
-            breath_bpm = 0.0
-            quality["apnea_state"] = True
-            quality["reason"] = "apnea"
-        else:
-            quality["apnea_state"] = False
-
         quality["phase_range"] = phase_range
         quality["breath_ratio"] = breath_power_ratio
+
+        # 信号质量不通过 → BPM 置 0、波形清空，所有模式统一生效
+        if not quality.get("valid"):
+            breath_bpm = 0.0
+            heart_bpm = 0.0
+            breath_signal_display = np.array([])
+            heart_signal_display = np.array([])
 
         self.last_heartbeat = time.time()
 
@@ -385,8 +450,8 @@ class Pipeline:
             timestamp=time.time(), frame_index=self._frame_count,
             breath_waveform=breath_signal_display,
             breath_bpm=round(breath_bpm, 1),
-            heart_bpm=round(heart_bpm, 1),  # 屏息时，心率依旧输出真实计算值
-            heart_waveform=heart_signal_display,  # 屏息时，依然输出心跳波形
+            heart_bpm=round(heart_bpm, 1),
+            heart_waveform=heart_signal_display,
             quality=quality,
         )
 
