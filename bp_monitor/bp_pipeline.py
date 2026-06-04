@@ -49,6 +49,7 @@ class BPPipeline:
     FS = 200.0
     FS_TARGET = 50.0
     N_INPUT = 256
+    STEP_FRAMES = 100   # sliding window step (~0.5 s at 200 Hz)
     DISTANCE_PER_BIN = 0.05
 
     def __init__(self, weights_path: str = "bp_matlab/bp_weights.mat"):
@@ -187,10 +188,7 @@ class BPPipeline:
         # ---- Step 4: Frequency scaling (MATLAB: × 24/60) ----
         unwrapped_scaled = unwrapped * (24.0 / 60.0)
 
-        # ---- Step 5: Signal cleaning (MATLAB PhaseProcess.RadarSignalCleaner) ----
-        clean = clean_pulse_wave(unwrapped_scaled, fs=self.FS)
-
-        # ---- Step 5b: Low-signal detection → re-acquire ----
+        # ---- Step 4b: Low-signal detection → re-acquire ----
         phase_range = float(np.max(unwrapped_scaled) - np.min(unwrapped_scaled))
         if phase_range < 0.001:
             print("[BPPipeline] Low signal, re-acquiring target...")
@@ -198,14 +196,17 @@ class BPPipeline:
             self._complex_buffer.clear()
             return
 
-        # ---- Step 6: Downsample 200→50Hz (MATLAB: resample(wave, 50, 200)) ----
-        wave_50hz = resample_poly(clean, up=50, down=200)
+        # ---- Step 5: Downsample 200→50Hz first (reduces EMD cost ~10×) ----
+        wave_50hz_raw = resample_poly(unwrapped_scaled, up=50, down=200)
+
+        # ---- Step 6: Signal cleaning at 50Hz (MATLAB PhaseProcess.RadarSignalCleaner) ----
+        clean = clean_pulse_wave(wave_50hz_raw, fs=self.FS_TARGET)
 
         # Take last 256 points (MATLAB: wave_50hz(end-255:end))
-        if len(wave_50hz) >= self.N_INPUT:
-            input_seq = wave_50hz[-self.N_INPUT:]
+        if len(clean) >= self.N_INPUT:
+            input_seq = clean[-self.N_INPUT:]
         else:
-            input_seq = np.pad(wave_50hz, (self.N_INPUT - len(wave_50hz), 0))
+            input_seq = np.pad(clean, (self.N_INPUT - len(clean), 0))
 
         # ---- Step 7: Network inference ----
         print(f"[BPPipeline] phase_range={phase_range:.4f}  "
@@ -229,8 +230,8 @@ class BPPipeline:
         )
         self._push_to_display(result)
 
-        # ---- Clear buffer for next batch (MATLAB: loops back to read_data) ----
-        self._complex_buffer.clear()
+        # ---- Slide window forward (keeps most recent data for next batch) ----
+        self._complex_buffer = self._complex_buffer[self.STEP_FRAMES:]
 
         if not np.isnan(sbp):
             print(f"[BPPipeline] Result: SBP={sbp:.1f} DBP={dbp:.1f} mmHg "

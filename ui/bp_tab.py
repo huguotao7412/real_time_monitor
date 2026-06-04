@@ -8,6 +8,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 
 from ui.wave_widget import WaveWidget
+from ui.subject_tab import HeartBeatIcon
 from config.i18n import tr, I18n
 
 
@@ -82,6 +83,10 @@ class BPTab(QWidget):
         super().__init__(parent)
         self._last_update_time = time.time()
 
+        # Rolling waveform display buffer (24 s history at 50 Hz)
+        self._display_buffer = np.zeros(1200, dtype=np.float32)
+        self._last_frame_index = 0
+
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -104,6 +109,14 @@ class BPTab(QWidget):
         sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet("background-color: #3a3a4a;")
         layout.addWidget(sep)
+
+        # --- Heart icon row (implicit HR from peak count) ---
+        heart_row = QHBoxLayout()
+        heart_row.addStretch()
+        self._heart_icon = HeartBeatIcon(size=36)
+        heart_row.addWidget(self._heart_icon)
+        heart_row.addStretch()
+        layout.addLayout(heart_row)
 
         # --- Waveform ---
         self._wave = WaveWidget(
@@ -168,10 +181,31 @@ class BPTab(QWidget):
         self._sbp_panel.set_value(r.sbp)
         self._dbp_panel.set_value(r.dbp)
 
-        # Waveform: show latest 256-point BP waveform directly (5.12s at 50Hz)
+        # Waveform: incremental scrolling (append new points, shift old)
         wf = r.bp_waveform
         if wf.size > 0:
-            self._wave.set_data(wf.astype(np.float32))
+            frames_diff = r.frame_index - self._last_frame_index
+            self._last_frame_index = r.frame_index
+
+            new_points_count = int(frames_diff * (50.0 / 200.0))
+
+            if 0 < new_points_count <= 256:
+                new_segment = wf[-new_points_count:]
+                self._display_buffer[:-new_points_count] = \
+                    self._display_buffer[new_points_count:]
+                self._display_buffer[-new_points_count:] = new_segment
+            else:
+                self._display_buffer[-256:] = wf
+
+            self._wave.set_data(self._display_buffer)
+
+        # Implicit heart rate from systolic peak count
+        n_peaks = r.quality.get("n_peaks", 0) if r.quality else 0
+        if n_peaks > 0:
+            implicit_hr = n_peaks / 5.12 * 60.0  # 1024 frames / 200 Hz = 5.12 s
+            self._heart_icon.set_heart_bpm(implicit_hr, 0)
+        else:
+            self._heart_icon.set_heart_bpm(0, 0)
 
         # Info bar
         if not np.isnan(r.target_distance_m):
@@ -190,7 +224,10 @@ class BPTab(QWidget):
         """Clear all BP values to '--' state."""
         self._sbp_panel.set_value(float('nan'))
         self._dbp_panel.set_value(float('nan'))
+        self._display_buffer = np.zeros(1200, dtype=np.float32)
+        self._last_frame_index = 0
         self._wave.set_data(np.array([], dtype=np.float32))
         self._dist_label.setText("Distance: --")
         self._conf_dots.set_confidence(0.0)
         self._update_label.setText("")
+        self._heart_icon.set_heart_bpm(0, 0)

@@ -365,7 +365,18 @@ class Pipeline:
                     heart_bpm = adv_heart_bpm
 
                     # 中值预滤波 + Kalman 平滑 (与回退路径统一)
+                    # Physiological slew-rate limiting (prevents spike propagation)
+                    _dt = BPM_UPDATE_INTERVAL / FS_HZ
+                    _max_breath_delta = 2.0 * _dt
+                    _max_heart_delta = 5.0 * _dt
+
                     if breath_bpm > 0:
+                        if self._last_valid_breath_bpm > 0:
+                            breath_bpm = float(np.clip(
+                                breath_bpm,
+                                self._last_valid_breath_bpm - _max_breath_delta,
+                                self._last_valid_breath_bpm + _max_breath_delta,
+                            ))
                         self._breath_raw_history.append(breath_bpm)
                         breath_bpm_median = float(
                             np.median(list(self._breath_raw_history))
@@ -378,6 +389,12 @@ class Pipeline:
                         )
 
                     if heart_bpm > 0:
+                        if self._last_valid_heart_bpm > 0:
+                            heart_bpm = float(np.clip(
+                                heart_bpm,
+                                self._last_valid_heart_bpm - _max_heart_delta,
+                                self._last_valid_heart_bpm + _max_heart_delta,
+                            ))
                         self._heart_raw_history.append(heart_bpm)
                         heart_bpm_median = float(
                             np.median(list(self._heart_raw_history))
@@ -399,6 +416,10 @@ class Pipeline:
                     self._use_advanced_dsp = False
 
             if not self._use_advanced_dsp or breath_bpm <= 0:
+                _dt = BPM_UPDATE_INTERVAL / FS_HZ
+                _max_breath_delta = 2.0 * _dt
+                _max_heart_delta = 5.0 * _dt
+
                 breath_bpm = estimate_breath_bpm_time_domain(
                     breath_signal, fs=FS_HZ, min_interval_sec=1.5
                 )
@@ -407,6 +428,12 @@ class Pipeline:
                         breath_signal, FS_HZ, (0.1, 0.8), n_fft=1024
                     )
                 if breath_bpm > 0:
+                    if self._last_valid_breath_bpm > 0:
+                        breath_bpm = float(np.clip(
+                            breath_bpm,
+                            self._last_valid_breath_bpm - _max_breath_delta,
+                            self._last_valid_breath_bpm + _max_breath_delta,
+                        ))
                     self._last_valid_breath_bpm = breath_bpm
                     self._breath_history.append(breath_bpm)
                     if len(self._breath_history) > 15:
@@ -418,6 +445,12 @@ class Pipeline:
                     heart_signal, FS_HZ, (0.8, 2.5), f0=f0
                 )
                 if heart_bpm_raw > 0:
+                    if self._last_valid_heart_bpm > 0:
+                        heart_bpm_raw = float(np.clip(
+                            heart_bpm_raw,
+                            self._last_valid_heart_bpm - _max_heart_delta,
+                            self._last_valid_heart_bpm + _max_heart_delta,
+                        ))
                     self._last_valid_heart_bpm = heart_bpm_raw
                     self._heart_history.append(heart_bpm_raw)
                     self._heart_prominence_history.append(prominence)

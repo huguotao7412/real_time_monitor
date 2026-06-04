@@ -4,6 +4,7 @@ import threading
 import time
 import queue
 from abc import ABC, abstractmethod
+from collections import deque
 from datetime import datetime
 
 import numpy as np
@@ -102,10 +103,10 @@ class HRMode(MonitorMode):
         self._latest_vitals: VitalSigns | None = None
         self._trend_tick_counter: int = 0
 
-        # Data accumulation for export
-        self._csv_rows: list[dict] = []
-        self._breath_waveform_accum: list[np.ndarray] = []
-        self._heart_waveform_accum: list[np.ndarray] = []
+        # Data accumulation for export (bounded: ~1 hour at 1 row/s)
+        self._csv_rows: deque[dict] = deque(maxlen=3600)
+        self._breath_waveform_accum: deque[np.ndarray] = deque(maxlen=3600)
+        self._heart_waveform_accum: deque[np.ndarray] = deque(maxlen=3600)
         self._bpm_history: list[tuple[float, float, float]] = []
         self._sqi_history: list[dict] = []
 
@@ -258,9 +259,9 @@ class HRMode(MonitorMode):
 
     def get_export_data(self) -> dict:
         return {
-            "csv_rows": self._csv_rows,
-            "breath_waveform_accum": self._breath_waveform_accum,
-            "heart_waveform_accum": self._heart_waveform_accum,
+            "csv_rows": list(self._csv_rows),
+            "breath_waveform_accum": list(self._breath_waveform_accum),
+            "heart_waveform_accum": list(self._heart_waveform_accum),
             "bpm_history": self._bpm_history,
             "sqi_history": self._sqi_history,
             "latest_vitals": self._latest_vitals,
@@ -282,7 +283,7 @@ class BPMode(MonitorMode):
     def __init__(self):
         self._pipeline = None  # type: ignore  # BPPipeline
         self._latest_bp_result = None  # type: ignore  # BPResult
-        self._bp_results: list = []
+        self._bp_results: deque = deque(maxlen=720)  # ~1 hour at 5 s/batch
 
     # -- MonitorMode impl ------------------------------------------------
 

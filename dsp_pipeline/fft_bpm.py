@@ -62,7 +62,10 @@ def estimate_bpm(
     refine_mask = (freqs >= peak_freq - delta) & (freqs <= peak_freq + delta)
     if np.any(refine_mask):
         weights = spectrum[refine_mask] ** 2
-        refined_freq = np.average(freqs[refine_mask], weights=weights + 1e-10)
+        if np.sum(weights) < 1e-8:
+            refined_freq = peak_freq
+        else:
+            refined_freq = np.average(freqs[refine_mask], weights=weights + 1e-10)
     else:
         refined_freq = peak_freq
 

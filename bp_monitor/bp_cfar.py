@@ -40,7 +40,7 @@ def find_target_bins_1d(
 
     # Adaptive threshold: bottom 70% = noise
     sorted_e = np.sort(profile)
-    n_noise = int(0.7 * len(sorted_e))
+    n_noise = max(1, int(0.7 * len(sorted_e)))
     noise = sorted_e[:n_noise]
     noise_mean = float(np.mean(noise))
     noise_std = float(np.std(noise))
