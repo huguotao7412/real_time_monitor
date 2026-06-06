@@ -229,7 +229,7 @@ def estimate_bpm_stft(
     breath_bpm = _extract_bpm_from_stft(f_b, mag_b, (0.1, 0.8), 'breath')
 
     # --- Heart STFT ---
-    heart_win = max(32, int(n // 4))
+    heart_win = max(64, int(n * 0.6))
     heart_overlap = int(heart_win * 0.8)
     nfft_h = max(n_fft, 2 ** int(np.ceil(np.log2(heart_win))))
 
@@ -239,10 +239,10 @@ def estimate_bpm_stft(
     )
     mag_h = np.abs(Zxx_h)
 
-    heart_bpm_stft = _extract_bpm_from_stft(f_h, mag_h, (1.0, 2.0), 'heart')
+    heart_bpm_stft = _extract_bpm_from_stft(f_h, mag_h, (0.8, 2.5), 'heart')
 
     # FFT fallback for heart: upper bound
-    heart_fft_bpm, _ = estimate_bpm(heart_signal, fs, (1.0, 2.0))
+    heart_fft_bpm, _ = estimate_bpm(heart_signal, fs, (0.8, 2.5))
 
     if heart_bpm_stft > 0 and heart_fft_bpm > 0:
         heart_bpm = min(heart_bpm_stft, heart_fft_bpm)

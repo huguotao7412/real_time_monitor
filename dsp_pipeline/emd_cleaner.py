@@ -22,13 +22,13 @@ def emd_harmonic_clean(
         fs: Sampling rate in Hz.
         max_imf: Maximum number of IMFs to extract.
         resp_band: Frequency range for identifying breathing IMF (Hz).
-        harmonics: Harmonic orders to cancel (default: [1, 2, 3]).
+        harmonics: Harmonic orders to cancel (default: [2, 3, 4]).
 
     Returns:
         Cleaned signal, same shape as input. On failure, returns original signal.
     """
     if harmonics is None:
-        harmonics = [1, 2, 3]
+        harmonics = [2, 3, 4]
 
     n = len(signal)
     if n < 128:

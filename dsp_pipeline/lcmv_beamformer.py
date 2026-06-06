@@ -14,7 +14,7 @@ def lcmv_displacement(
     d_factor: float = 0.5,
     loading_factor: float = 0.01,
 ) -> np.ndarray:
-    """LCMV beamforming with derivative constraint → normalized displacement.
+    """LCMV beamforming with derivative constraint → unwrapped phase.
 
     Args:
         rx_matrix: Complex IQ data, shape [n_snapshots, n_channels].
@@ -25,8 +25,8 @@ def lcmv_displacement(
                         stability (fraction of mean trace).
 
     Returns:
-        Displacement signal, shape [n_snapshots], normalized to [0, 1]
-        (matches MATLAB rescale(unwrapped_phase)).
+        Unwrapped phase in radians, shape [n_snapshots].
+        Consistent with _fallback_phase_path for downstream phase_range checks.
 
     Raises:
         ValueError: If rx_matrix has < 2 channels or < 16 snapshots.
@@ -83,17 +83,6 @@ def lcmv_displacement(
     # Beamforming: y = w^H X
     beamformed = w_opt.conj() @ X  # [n_snapshots]
 
-    # Phase extraction → physical displacement (mm) → rescale [0,1] (MATLAB)
     raw_phase = np.angle(beamformed)
     unwrapped = np.unwrap(raw_phase)
-    lambda_mm = lambda_m * 1000
-    displacement = (lambda_mm / (4 * np.pi)) * unwrapped
-
-    # MATLAB: displacement = rescale(unwrapped_phase)
-    d_min, d_max = displacement.min(), displacement.max()
-    if d_max - d_min > 1e-10:
-        displacement = (displacement - d_min) / (d_max - d_min)
-    else:
-        displacement = np.zeros_like(displacement)
-
-    return displacement
+    return unwrapped
