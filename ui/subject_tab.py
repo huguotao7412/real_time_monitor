@@ -28,6 +28,7 @@ class SubjectTab(QWidget):
         self._sqi_level = 0
         self._calibration_was_done = False
         self._error_start_time: float | None = None
+        self._last_bpm_label_update: float = 0.0  # BPM 标签节流用时间戳
 
         self._setup_ui()
 
@@ -198,12 +199,16 @@ class SubjectTab(QWidget):
         # BPM opacity
         bpm_opacity = 0.4 if level == "error" else 1.0
 
-        # Breath BPM + petals
+        # Breath BPM + petals (标签 500ms 节流防闪烁)
+        now = time.time()
+        bpm_label_debounce = (now - self._last_bpm_label_update) >= 0.5
         if breath_bpm > 0:
-            self._breath_bpm_label.setText(f"{breath_bpm:.0f}")
+            if bpm_label_debounce:
+                self._breath_bpm_label.setText(f"{breath_bpm:.0f}")
             self._petals.set_breath_bpm(breath_bpm, dt)
         else:
-            self._breath_bpm_label.setText("--")
+            if bpm_label_debounce:
+                self._breath_bpm_label.setText("--")
             self._petals.set_breath_bpm(0, dt)
 
         self._breath_bpm_label.setStyleSheet(
@@ -212,11 +217,15 @@ class SubjectTab(QWidget):
 
         # Heart BPM + icon
         if heart_bpm > 0:
-            self._heart_bpm_label.setText(f"{heart_bpm:.0f}")
+            if bpm_label_debounce:
+                self._heart_bpm_label.setText(f"{heart_bpm:.0f}")
             self._heart_icon.set_heart_bpm(heart_bpm, dt)
         else:
-            self._heart_bpm_label.setText("--")
+            if bpm_label_debounce:
+                self._heart_bpm_label.setText("--")
             self._heart_icon.set_heart_bpm(0, dt)
+        if bpm_label_debounce:
+            self._last_bpm_label_update = now
 
         heart_color = self._heart_icon.current_color()
         self._heart_bpm_label.setStyleSheet(

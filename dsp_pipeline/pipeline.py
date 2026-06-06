@@ -73,6 +73,10 @@ class Pipeline:
         self._last_valid_breath_bpm: float = 0.0
         self._last_valid_heart_bpm: float = 0.0
 
+        # EMA 平滑状态 + 生理区间拦截
+        self._breath_ema: float = 0.0
+        self._heart_ema: float = 0.0
+
         # 自适应 Kalman: 心率 prominence 历史
         self._heart_prominence_history: list[float] = []
 
@@ -473,6 +477,29 @@ class Pipeline:
             heart_bpm = 0.0
             breath_signal_display = np.array([])
             heart_signal_display = np.array([])
+
+        # --- EMA 平滑 + 生理区间拦截 ---
+        # 呼吸 [8, 45] BPM, 动态 α: 变化>5→α=0.5 快响应, 稳定→α=0.15 锁数值
+        if 8 <= breath_bpm <= 45:
+            delta = abs(breath_bpm - self._breath_ema) if self._breath_ema > 0 else 99
+            alpha = 0.5 if delta > 5 else 0.15
+            self._breath_ema = (1 - alpha) * self._breath_ema + alpha * breath_bpm
+            breath_bpm = self._breath_ema
+        elif breath_bpm > 0:
+            breath_bpm = self._breath_ema if self._breath_ema > 0 else breath_bpm
+        if breath_bpm == 0:
+            self._breath_ema = 0.0
+
+        # 心率 [48, 150] BPM, 动态 α: 变化>10→α=0.5 快响应, 稳定→α=0.2
+        if 48 <= heart_bpm <= 150:
+            delta = abs(heart_bpm - self._heart_ema) if self._heart_ema > 0 else 99
+            alpha = 0.5 if delta > 10 else 0.2
+            self._heart_ema = (1 - alpha) * self._heart_ema + alpha * heart_bpm
+            heart_bpm = self._heart_ema
+        elif heart_bpm > 0:
+            heart_bpm = self._heart_ema if self._heart_ema > 0 else heart_bpm
+        if heart_bpm == 0:
+            self._heart_ema = 0.0
 
         self.last_heartbeat = time.time()
 

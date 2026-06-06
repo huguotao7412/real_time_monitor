@@ -1,5 +1,7 @@
 """Research mode tab — full DSP data, waveforms with axes, trend panel, debug."""
 
+import time
+
 import numpy as np
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSplitter, QFrame,
@@ -21,6 +23,7 @@ class ResearchTab(QWidget):
         super().__init__(parent)
         self._sqi_level = 0
         self._debug_expanded = False
+        self._last_bpm_label_update: float = 0.0
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -141,11 +144,15 @@ class ResearchTab(QWidget):
         if len(heart_waveform) > 0:
             self._heart_wave.set_data(heart_waveform)
 
-        # BPM
-        if breath_bpm > 0:
-            self._breath_bpm_label.setText(f"{breath_bpm:.0f}")
-        if heart_bpm > 0:
-            self._heart_bpm_label.setText(f"{heart_bpm:.0f}")
+        # BPM (标签 500ms 节流防闪烁)
+        now = time.time()
+        bpm_debounce = (now - self._last_bpm_label_update) >= 0.5
+        if bpm_debounce:
+            if breath_bpm > 0:
+                self._breath_bpm_label.setText(f"{breath_bpm:.0f}")
+            if heart_bpm > 0:
+                self._heart_bpm_label.setText(f"{heart_bpm:.0f}")
+            self._last_bpm_label_update = now
 
         # SQI
         phase_range = quality.get("phase_range", 0.0) if quality else 0.0

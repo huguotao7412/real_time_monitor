@@ -46,13 +46,26 @@ def estimate_bpm(
     peak_idx = np.argmax(band_spectrum)
     peak_freq = band_freqs[peak_idx]
 
-    # 半频检测: 若半频处能量 > 主峰 50%, 主峰实为二次谐波, 重新锁定到半频
+    # 半频检测: 结合局部峰值(Local Peak)特性的智能谐波抑制
     half_freq = peak_freq / 2.0
     if half_freq >= valid_band[0]:
-        half_mask = (band_freqs >= half_freq * 0.85) & (band_freqs <= half_freq * 1.15)
+        # 扩大搜索范围以确保捕捉到完整的波峰
+        half_mask = (band_freqs >= half_freq * 0.8) & (band_freqs <= half_freq * 1.2)
         if np.any(half_mask):
             sub_peak_idx = np.argmax(band_spectrum * half_mask)
-            if band_spectrum[sub_peak_idx] > band_spectrum[peak_idx] * 0.5:
+
+            # 判断该位置是否为真实的局部峰值，而非 1/f 噪声的下坡斜坡
+            is_local_peak = True
+            if sub_peak_idx > 0 and band_spectrum[sub_peak_idx] <= band_spectrum[sub_peak_idx - 1]:
+                is_local_peak = False
+            if sub_peak_idx < len(band_spectrum) - 1 and band_spectrum[sub_peak_idx] <= band_spectrum[sub_peak_idx + 1]:
+                is_local_peak = False
+
+            ratio = band_spectrum[sub_peak_idx] / (band_spectrum[peak_idx] + 1e-10)
+
+            # 策略：如果是真实的凸起波峰，能量>15%即被认定为基频（解决15被识别为30）
+            # 如果只是斜坡，则需要极其庞大的能量(>50%)才妥协（防止30掉到15）
+            if (is_local_peak and ratio > 0.15) or ratio > 0.5:
                 peak_idx = sub_peak_idx
                 peak_freq = band_freqs[peak_idx]
 
@@ -299,14 +312,32 @@ def _extract_bpm_from_stft(
     max_indices = np.argmax(mag_roi, axis=0)
     trace_hz = f_roi[max_indices]
 
-    # 呼吸: 每列半频检测, 防二次谐波锁定 (30 BPM 谐波锁替 15 BPM 基频)
+    # 呼吸: 每列智能半频检测，防二次谐波锁定及低频噪声误捕获
     if signal_type == 'breath':
         for t in range(len(trace_hz)):
-            hf = trace_hz[t] / 2.0
+            pf = trace_hz[t]
+            p_mag = mag_roi[max_indices[t], t]
+            hf = pf / 2.0
+
             if hf >= f_lo:
-                half_idx = np.argmin(np.abs(f_roi - hf))
-                if mag_roi[half_idx, t] > mag_roi[max_indices[t], t] * 0.4:
-                    trace_hz[t] = f_roi[half_idx]
+                # 在半频附近寻找局部极值
+                mask = (f_roi >= hf * 0.8) & (f_roi <= hf * 1.2)
+                if np.any(mask):
+                    indices = np.where(mask)[0]
+                    col_data = mag_roi[:, t]
+                    best_idx = indices[np.argmax(col_data[indices])]
+
+                    # 验证局部峰值特征
+                    is_local_peak = True
+                    if best_idx > 0 and col_data[best_idx] <= col_data[best_idx - 1]:
+                        is_local_peak = False
+                    if best_idx < len(col_data) - 1 and col_data[best_idx] <= col_data[best_idx + 1]:
+                        is_local_peak = False
+
+                    ratio = col_data[best_idx] / (p_mag + 1e-10)
+
+                    if (is_local_peak and ratio > 0.15) or ratio > 0.5:
+                        trace_hz[t] = f_roi[best_idx]
 
     # Kalman filter the trace
     if signal_type == 'breath':
