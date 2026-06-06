@@ -43,7 +43,7 @@ BREATH_BAND = (0.1, 0.6)   # 呼吸: 6-36 次/分钟
 HEART_BAND = (0.8, 2.5)    # 心率: 48-150 次/分钟
 
 # === Queue 容量 ===
-RAW_QUEUE_MAXSIZE = 64
+RAW_QUEUE_MAXSIZE = 256
 DISPLAY_QUEUE_MAXSIZE = 16
 
 # === UI 参数 ===

@@ -34,11 +34,13 @@ class VitalSignFilter:
 
 # 保留旧接口兼容
 def remove_dc(signal: np.ndarray, window: int = 200) -> np.ndarray:
-    if len(signal) < window:
-        return signal - np.mean(signal)
-    kernel = np.ones(window) / window
-    rolling_mean = np.convolve(signal, kernel, mode="same")
-    return signal - rolling_mean
+    """Remove DC component by subtracting global mean.
+
+    For short windows (~200 samples for vital signs), global mean is preferred
+    over rolling mean, which acts as a high-pass filter and attenuates slow
+    breath signals below 0.1 Hz.
+    """
+    return signal - np.mean(signal)
 
 
 def butter_bandpass(signal, lowcut, highcut, fs=20.0, order=4):

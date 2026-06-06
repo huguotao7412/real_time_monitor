@@ -288,10 +288,12 @@ def estimate_bpm_stft(
     if n < 64:
         return 0.0, 0.0
 
-    # --- Breath: 无偏自相关 (全窗口单次周期估计, 无 STFT 2列瓶颈) ---
+    # --- Breath: 无偏自相关 → FFT 频谱寻峰 → 时域峰值 (三级降级) ---
     breath_bpm = estimate_bpm_autocorr(breath_signal, fs, (0.1, 0.8))
     if breath_bpm <= 0:
-        breath_bpm = estimate_breath_bpm_time_domain(breath_signal, fs)
+        breath_bpm, _ = estimate_bpm(breath_signal, fs, (0.1, 0.8), n_fft=2048)
+        if breath_bpm <= 0:
+            breath_bpm = estimate_breath_bpm_time_domain(breath_signal, fs)
 
     # --- Heart STFT (MATLAB: 25% hamming, 80% overlap) ---
     heart_win = max(32, int(n // 4))

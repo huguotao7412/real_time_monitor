@@ -379,7 +379,7 @@ class Pipeline:
                         self._breath_history.append(breath_bpm)
                         if len(self._breath_history) > 12:
                             self._breath_history = self._breath_history[-12:]
-                        breath_bpm = kalman_smooth(self._breath_history, q=1e-4, r=0.1)
+                        breath_bpm = kalman_smooth(self._breath_history, q=1e-2, r=0.1)
                         self._last_valid_breath_bpm = breath_bpm
 
                     if heart_bpm > 0:
@@ -409,7 +409,7 @@ class Pipeline:
                     self._breath_history.append(breath_bpm)
                     if len(self._breath_history) > 12:
                         self._breath_history = self._breath_history[-12:]
-                    breath_bpm = kalman_smooth(self._breath_history, q=1e-4, r=0.1)
+                    breath_bpm = kalman_smooth(self._breath_history, q=1e-2, r=0.1)
                     self._last_valid_breath_bpm = breath_bpm
 
                 f0 = breath_bpm / 60.0 if breath_bpm > 0 else 0.0
@@ -439,16 +439,10 @@ class Pipeline:
             breath_signal_display = np.array([])
             heart_signal_display = np.array([])
 
-        # EMA 终段: 慢速显示平滑 (α=0.1, Kalman 之后再做轻量平均)
-        if breath_bpm > 0:
-            self._breath_ema = 0.9 * self._breath_ema + 0.1 * breath_bpm
-            breath_bpm = self._breath_ema
-        else:
+        # 重置 EMA 状态当 BPM 归零时
+        if breath_bpm <= 0:
             self._breath_ema = 0.0
-        if heart_bpm > 0:
-            self._heart_ema = 0.9 * self._heart_ema + 0.1 * heart_bpm
-            heart_bpm = self._heart_ema
-        else:
+        if heart_bpm <= 0:
             self._heart_ema = 0.0
 
         self.last_heartbeat = time.time()

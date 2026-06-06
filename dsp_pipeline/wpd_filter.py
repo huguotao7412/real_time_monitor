@@ -25,7 +25,8 @@ def _reconstruct_band(
 ) -> np.ndarray:
     """Reconstruct signal by summing WPD nodes whose center freq falls in freq_band.
 
-    Matches MATLAB: sum(wprcoef(node)) for nodes where center_freq in band.
+    Collects all target leaf paths first, zeros non-target leaves once,
+    then calls wp.reconstruct() a single time to avoid the O(N) performance trap.
     """
     nodes = wp.get_level(level, order='freq')
     num_nodes = len(nodes)  # 2^level
@@ -33,35 +34,31 @@ def _reconstruct_band(
     f_lo, f_hi = freq_band
 
     leaf_nodes = wp.get_leaf_nodes()
-    n_signal = len(wp.reconstruct(update=False))
-    result = np.zeros(n_signal)
 
-    # Build mapping: frequency-order node path -> list of its leaf paths
+    # Collect all target leaf paths across matching nodes
+    all_target_leaves: set[str] = set()
     for i, node in enumerate(nodes):
-        center_freq = (i + 0.5) * f_node_bw  # 0-indexed freq order
+        center_freq = (i + 0.5) * f_node_bw
         if not (f_lo <= center_freq <= f_hi):
             continue
-
-        target_leaves = [
-            leaf.path for leaf in leaf_nodes
-            if leaf.path.startswith(node.path)
-        ]
-
-        if not target_leaves:
-            continue
-
-        # Backup all leaf data, zero non-target leaves, reconstruct, restore
-        backup = {leaf.path: leaf.data.copy() for leaf in leaf_nodes}
-
         for leaf in leaf_nodes:
-            if leaf.path not in target_leaves:
-                leaf.data[:] = 0.0
+            if leaf.path.startswith(node.path):
+                all_target_leaves.add(leaf.path)
 
-        result += wp.reconstruct(update=False)
+    if not all_target_leaves:
+        return np.zeros(len(wp.reconstruct(update=False)))
 
-        # Restore all leaf data for next iteration
-        for leaf in leaf_nodes:
-            leaf.data[:] = backup[leaf.path]
+    # Backup all leaf data, zero non-target leaves, reconstruct once, restore
+    backup = {leaf.path: leaf.data.copy() for leaf in leaf_nodes}
+
+    for leaf in leaf_nodes:
+        if leaf.path not in all_target_leaves:
+            leaf.data[:] = 0.0
+
+    result = wp.reconstruct(update=False)
+
+    for leaf in leaf_nodes:
+        leaf.data[:] = backup[leaf.path]
 
     return result
 
@@ -93,15 +90,13 @@ def wpd_separate(
 
     wpt_level = _compute_wpd_level(n)
 
-    # Breath: db6 wavelet, no diff, no EMD (MATLAB: sig_enhanced_nodiff = FiltedData(2:end))
-    breath_input = signal[1:] if len(signal) > 1 else signal
+    # Breath: db6 wavelet, no diff, no EMD
+    breath_input = signal.copy()
     try:
         wp_breath = pywt.WaveletPacket(
             breath_input, 'db6', mode='symmetric', maxlevel=wpt_level
         )
         breath_wave = _reconstruct_band(wp_breath, wpt_level, fs, breath_band)
-        if len(breath_wave) < n:
-            breath_wave = np.pad(breath_wave, (0, n - len(breath_wave)))
     except Exception:
         breath_wave = signal.copy()
 

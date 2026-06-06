@@ -144,15 +144,12 @@ class HRMode(MonitorMode):
     def feed_frame(self, frame: RadarFrame) -> None:
         if self._pipeline is None:
             return
-        while True:
-            try:
-                self._pipeline.raw_queue.put_nowait(frame)
-                break
-            except queue.Full:
-                try:
-                    self._pipeline.raw_queue.get_nowait()
-                except queue.Empty:
-                    pass
+        try:
+            self._pipeline.raw_queue.put_nowait(frame)
+        except queue.Full:
+            with self._pipeline.raw_queue.mutex:
+                self._pipeline.raw_queue.queue.clear()
+            self._pipeline.raw_queue.put_nowait(frame)
 
     def poll_and_update(self, subject_tab, bp_tab, research_tab,
                         status_label, elapsed_label, frame_rate_label,
@@ -318,15 +315,12 @@ class BPMode(MonitorMode):
     def feed_frame(self, frame: RadarFrame) -> None:
         if self._pipeline is None:
             return
-        while True:
-            try:
-                self._pipeline.raw_queue.put_nowait(frame)
-                break
-            except queue.Full:
-                try:
-                    self._pipeline.raw_queue.get_nowait()
-                except queue.Empty:
-                    pass
+        try:
+            self._pipeline.raw_queue.put_nowait(frame)
+        except queue.Full:
+            with self._pipeline.raw_queue.mutex:
+                self._pipeline.raw_queue.queue.clear()
+            self._pipeline.raw_queue.put_nowait(frame)
 
     def poll_and_update(self, subject_tab, bp_tab, research_tab,
                         status_label, elapsed_label, frame_rate_label,
