@@ -65,8 +65,8 @@ class Pipeline:
         # Kalman 追踪历史
         self._breath_history: list[float] = []
         self._heart_history: list[float] = []
-        self._breath_raw_history: deque[float] = deque(maxlen=5)  # 中值预滤波
-        self._heart_raw_history: deque[float] = deque(maxlen=5)
+        self._breath_raw_history: deque[float] = deque(maxlen=3)  # 中值预滤波
+        self._heart_raw_history: deque[float] = deque(maxlen=3)
 
         # 弱信号计数 (用于 Range Bin 重捕获)
         self._low_signal_frame_count: int = 0
@@ -364,52 +364,46 @@ class Pipeline:
                     breath_bpm = adv_breath_bpm
                     heart_bpm = adv_heart_bpm
 
-                    # 中值预滤波 + Kalman 平滑 (与回退路径统一)
-                    # Physiological slew-rate limiting (prevents spike propagation)
+                    # 优化后: 中值去毛刺 → 放宽限幅 → 高响应Kalman
                     _dt = BPM_UPDATE_INTERVAL / FS_HZ
-                    _max_breath_delta = 2.0 * _dt
-                    _max_heart_delta = 5.0 * _dt
+                    _max_breath_delta = 10.0 * _dt
+                    _max_heart_delta = 25.0 * _dt
 
                     if breath_bpm > 0:
+                        # 1. 3点中值, 剔除单帧FFT飞点
+                        self._breath_raw_history.append(breath_bpm)
+                        breath_bpm_median = float(np.median(list(self._breath_raw_history)))
+                        # 2. 放宽限幅 (仅极端防呆)
                         if self._last_valid_breath_bpm > 0:
-                            breath_bpm = float(np.clip(
-                                breath_bpm,
+                            breath_bpm_median = float(np.clip(
+                                breath_bpm_median,
                                 self._last_valid_breath_bpm - _max_breath_delta,
                                 self._last_valid_breath_bpm + _max_breath_delta,
                             ))
-                        self._breath_raw_history.append(breath_bpm)
-                        breath_bpm_median = float(
-                            np.median(list(self._breath_raw_history))
-                        )
+                        self._last_valid_breath_bpm = breath_bpm_median
+                        # 3. 高响应Kalman
                         self._breath_history.append(breath_bpm_median)
-                        if len(self._breath_history) > 15:
-                            self._breath_history = self._breath_history[-15:]
-                        breath_bpm = kalman_smooth(
-                            self._breath_history, q=5e-3, r=0.3
-                        )
+                        if len(self._breath_history) > 10:
+                            self._breath_history = self._breath_history[-10:]
+                        breath_bpm = kalman_smooth(self._breath_history, q=0.05, r=0.1)
 
                     if heart_bpm > 0:
+                        # 1. 3点中值
+                        self._heart_raw_history.append(heart_bpm)
+                        heart_bpm_median = float(np.median(list(self._heart_raw_history)))
+                        # 2. 放宽限幅
                         if self._last_valid_heart_bpm > 0:
-                            heart_bpm = float(np.clip(
-                                heart_bpm,
+                            heart_bpm_median = float(np.clip(
+                                heart_bpm_median,
                                 self._last_valid_heart_bpm - _max_heart_delta,
                                 self._last_valid_heart_bpm + _max_heart_delta,
                             ))
-                        self._heart_raw_history.append(heart_bpm)
-                        heart_bpm_median = float(
-                            np.median(list(self._heart_raw_history))
-                        )
+                        self._last_valid_heart_bpm = heart_bpm_median
+                        # 3. 高响应Kalman
                         self._heart_history.append(heart_bpm_median)
-                        if len(self._heart_history) > 15:
-                            self._heart_history = self._heart_history[-15:]
-                        heart_bpm = kalman_smooth(
-                            self._heart_history, q=1e-3, r=0.5
-                        )
-
-                    if breath_bpm > 0:
-                        self._last_valid_breath_bpm = breath_bpm
-                    if heart_bpm > 0:
-                        self._last_valid_heart_bpm = heart_bpm
+                        if len(self._heart_history) > 10:
+                            self._heart_history = self._heart_history[-10:]
+                        heart_bpm = kalman_smooth(self._heart_history, q=0.05, r=0.2)
                     self._cached_breath_wave = adv_breath
                     self._cached_heart_wave = adv_heart
                 except Exception:
@@ -417,8 +411,8 @@ class Pipeline:
 
             if not self._use_advanced_dsp or breath_bpm <= 0:
                 _dt = BPM_UPDATE_INTERVAL / FS_HZ
-                _max_breath_delta = 2.0 * _dt
-                _max_heart_delta = 5.0 * _dt
+                _max_breath_delta = 10.0 * _dt
+                _max_heart_delta = 25.0 * _dt
 
                 breath_bpm = estimate_breath_bpm_time_domain(
                     breath_signal, fs=FS_HZ, min_interval_sec=1.5
@@ -428,38 +422,42 @@ class Pipeline:
                         breath_signal, FS_HZ, (0.1, 0.8), n_fft=1024
                     )
                 if breath_bpm > 0:
+                    self._breath_raw_history.append(breath_bpm)
+                    breath_bpm_median = float(np.median(list(self._breath_raw_history)))
                     if self._last_valid_breath_bpm > 0:
-                        breath_bpm = float(np.clip(
-                            breath_bpm,
+                        breath_bpm_median = float(np.clip(
+                            breath_bpm_median,
                             self._last_valid_breath_bpm - _max_breath_delta,
                             self._last_valid_breath_bpm + _max_breath_delta,
                         ))
-                    self._last_valid_breath_bpm = breath_bpm
-                    self._breath_history.append(breath_bpm)
-                    if len(self._breath_history) > 15:
-                        self._breath_history = self._breath_history[-15:]
-                    breath_bpm = kalman_smooth(self._breath_history, q=5e-3, r=0.3)
+                    self._last_valid_breath_bpm = breath_bpm_median
+                    self._breath_history.append(breath_bpm_median)
+                    if len(self._breath_history) > 10:
+                        self._breath_history = self._breath_history[-10:]
+                    breath_bpm = kalman_smooth(self._breath_history, q=0.05, r=0.1)
 
                 f0 = breath_bpm / 60.0 if breath_bpm > 0 else 0.0
                 heart_bpm_raw, prominence = estimate_bpm(
                     heart_signal, FS_HZ, (0.8, 2.5), f0=f0
                 )
                 if heart_bpm_raw > 0:
+                    self._heart_raw_history.append(heart_bpm_raw)
+                    heart_bpm_median = float(np.median(list(self._heart_raw_history)))
                     if self._last_valid_heart_bpm > 0:
-                        heart_bpm_raw = float(np.clip(
-                            heart_bpm_raw,
+                        heart_bpm_median = float(np.clip(
+                            heart_bpm_median,
                             self._last_valid_heart_bpm - _max_heart_delta,
                             self._last_valid_heart_bpm + _max_heart_delta,
                         ))
-                    self._last_valid_heart_bpm = heart_bpm_raw
-                    self._heart_history.append(heart_bpm_raw)
+                    self._last_valid_heart_bpm = heart_bpm_median
+                    self._heart_history.append(heart_bpm_median)
                     self._heart_prominence_history.append(prominence)
-                    if len(self._heart_history) > 15:
-                        self._heart_history = self._heart_history[-15:]
-                    if len(self._heart_prominence_history) > 15:
-                        self._heart_prominence_history = self._heart_prominence_history[-15:]
+                    if len(self._heart_history) > 10:
+                        self._heart_history = self._heart_history[-10:]
+                    if len(self._heart_prominence_history) > 10:
+                        self._heart_prominence_history = self._heart_prominence_history[-10:]
                     heart_bpm = kalman_smooth(
-                        self._heart_history, q=1e-3, r=0.5,
+                        self._heart_history, q=0.05, r=0.2,
                         prominences=self._heart_prominence_history,
                     )
 

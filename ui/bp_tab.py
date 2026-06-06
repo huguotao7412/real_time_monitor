@@ -181,23 +181,51 @@ class BPTab(QWidget):
         self._sbp_panel.set_value(r.sbp)
         self._dbp_panel.set_value(r.dbp)
 
-        # Waveform: incremental scrolling (append new points, shift old)
+        # === 2. 波形平滑拼接与边缘规避 (引入 0.5s 视觉延迟) ===
         wf = r.bp_waveform
         if wf.size > 0:
             frames_diff = r.frame_index - self._last_frame_index
             self._last_frame_index = r.frame_index
 
+            # 正常步进为 100 帧，下采样到 50Hz 为 25 个点
             new_points_count = int(frames_diff * (50.0 / 200.0))
 
-            if 0 < new_points_count <= 256:
-                new_segment = wf[-new_points_count:]
+            # --- 平滑策略参数 ---
+            DELAY_PTS = 25  # 视觉延迟 0.5 秒，彻底丢弃网络预测末端的发散扭曲区
+            FADE_PTS = 10  # 交叉淡入淡出的重叠点数，用于抹平基线跳变
+
+            if 0 < new_points_count <= (256 - DELAY_PTS - FADE_PTS):
+                # A. 截取安全区数据：避开最右侧边缘，并多取 FADE_PTS 个点用于重叠融合
+                fetch_len = new_points_count + FADE_PTS
+                safe_end = -DELAY_PTS
+                safe_start = safe_end - fetch_len
+                new_segment = wf[safe_start:safe_end]
+
+                # B. 显示缓冲左移，腾出新空间
                 self._display_buffer[:-new_points_count] = \
                     self._display_buffer[new_points_count:]
-                self._display_buffer[-new_points_count:] = new_segment
+
+                # C. 执行 Cross-Fade (对旧波形尾部和新波形头部进行线性加权平滑)
+                seam_start = -new_points_count - FADE_PTS
+                seam_end = -new_points_count
+
+                old_edge = self._display_buffer[seam_start:seam_end]
+                new_edge = new_segment[:FADE_PTS]
+                weights = np.linspace(0, 1, FADE_PTS, dtype=np.float32)
+
+                self._display_buffer[seam_start:seam_end] = old_edge * (1 - weights) + new_edge * weights
+
+                # D. 填入剩余的纯新数据
+                self._display_buffer[-new_points_count:] = new_segment[FADE_PTS:]
             else:
+                # 初始化或发生大跳跃时，安全回退策略
                 self._display_buffer[-256:] = wf
 
-            self._wave.set_data(self._display_buffer)
+            # E. 全局轻量级卷积平滑：去除拼接残余微小毛刺，保留舒张/收缩压峰值特征
+            kernel = np.array([0.2, 0.6, 0.2], dtype=np.float32)
+            smoothed_buffer = np.convolve(self._display_buffer, kernel, mode='same')
+
+            self._wave.set_data(smoothed_buffer)
 
         # Implicit heart rate from systolic peak count
         n_peaks = r.quality.get("n_peaks", 0) if r.quality else 0
