@@ -46,6 +46,16 @@ def estimate_bpm(
     peak_idx = np.argmax(band_spectrum)
     peak_freq = band_freqs[peak_idx]
 
+    # 半频检测: 若半频处能量 > 主峰 35%, 主峰实为二次谐波, 重新锁定到半频
+    half_freq = peak_freq / 2.0
+    if half_freq >= valid_band[0]:
+        half_mask = (band_freqs >= half_freq * 0.8) & (band_freqs <= half_freq * 1.2)
+        if np.any(half_mask):
+            sub_peak_idx = np.argmax(band_spectrum * half_mask)
+            if band_spectrum[sub_peak_idx] > band_spectrum[peak_idx] * 0.35:
+                peak_idx = sub_peak_idx
+                peak_freq = band_freqs[peak_idx]
+
     # 计算 peak prominence (抑制平坦频谱的零显著性警告)
     from scipy.signal import peak_prominences
     with warnings.catch_warnings():
@@ -215,13 +225,13 @@ def estimate_bpm_stft(
         return 0.0, 0.0
 
     # --- Breath STFT ---
-    breath_win = max(32, int(n * 3 / 4))
-    breath_overlap = int(breath_win * 0.8)
+    breath_win = max(64, int(n * 0.9))
+    breath_overlap = int(breath_win * 0.9)
     nfft_b = max(n_fft, 2 ** int(np.ceil(np.log2(breath_win))))
 
     breath_dt = _detrend_cubic(breath_signal)
     f_b, t_b, Zxx_b = stft(
-        breath_dt, fs, window='hamming', nperseg=breath_win,
+        breath_dt, fs, window='boxcar', nperseg=breath_win,
         noverlap=breath_overlap, nfft=nfft_b,
     )
     mag_b = np.abs(Zxx_b)

@@ -315,12 +315,11 @@ class Pipeline:
         if displacement is None:
             return None
 
-        # 一阶差分增强
         no_dc = remove_dc(displacement)
         enhanced = np.diff(no_dc, prepend=no_dc[0])
 
-        # SOS 带通滤波
-        breath_signal = self._filter.filter_breath(enhanced)
+        # SOS 带通滤波: 呼吸用原始位移防振铃分裂, 心跳用差分放大高频脉冲
+        breath_signal = self._filter.filter_breath(no_dc)
         heart_signal = self._filter.filter_heart(enhanced)
 
         # 信号能量指标
