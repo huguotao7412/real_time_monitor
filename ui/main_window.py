@@ -3,11 +3,8 @@
 Mode-specific logic (HR vs BP) is delegated to MonitorMode strategy objects.
 """
 
-import os
-import glob
 import time
 import threading
-from datetime import datetime
 
 import numpy as np
 from PyQt6.QtWidgets import (
@@ -20,11 +17,10 @@ from PyQt6.QtGui import QFont
 
 from config.protocol import UI_REFRESH_MS
 from config.i18n import tr, I18n
-from io_engine.bin_reader import BinFileReader
 from io_engine.uart_parser import UartParser
 from io_engine.serial_manager import SerialManager
 from io_engine.radar_mgr import RadarMgr
-from io_engine.data_exporter import export_csv, export_hdf5, export_edf
+from io_engine.data_exporter import export_csv, export_hdf5, export_edf, export_bp_csv, export_bp_hdf5
 
 from ui.subject_tab import SubjectTab
 from ui.research_tab import ResearchTab
@@ -32,28 +28,20 @@ from ui.monitor_mode import MonitorMode, HRMode, BPMode
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, mode: str = "replay", replay_file: str | None = None,
-                 bp_replay: bool = False):
+    def __init__(self, bp_mode: bool = False):
         super().__init__()
         self.setWindowTitle(tr("window_title"))
         self.resize(1200, 800)
 
-        self._mode_type = mode  # "serial" or "replay"
-        self._replay_file = replay_file
-
-        # Mode object (Strategy pattern) — the ONLY mode reference
-        self._current_mode: MonitorMode = BPMode() if bp_replay else HRMode()
-
-        # Replay
-        self._bin_reader: BinFileReader | None = None
-        self._replay_timer: QTimer | None = None
+        # Mode object (Strategy pattern)
+        self._current_mode: MonitorMode = BPMode() if bp_mode else HRMode()
 
         # Shared state
         self._start_time: float = 0.0
         self._frame_count: int = 0
         self._running: bool = False
 
-        # Serial mode
+        # Serial mode (always)
         self._serial_mgr: SerialManager | None = None
         self._radar_mgr: RadarMgr | None = None
         self._uart_parser: UartParser | None = None
@@ -61,11 +49,10 @@ class MainWindow(QMainWindow):
         self._stop_event: threading.Event | None = None
         self._serial_status: str = ""
         self._serial_error: bool = False
-        if mode == "serial":
-            self._serial_mgr = SerialManager()
-            self._radar_mgr = RadarMgr(self._serial_mgr)
-            self._uart_parser = UartParser(
-                bins_per_frame=self._current_mode.uart_bins)
+        self._serial_mgr = SerialManager()
+        self._radar_mgr = RadarMgr(self._serial_mgr)
+        self._uart_parser = UartParser(
+            bins_per_frame=self._current_mode.uart_bins)
 
         self._setup_ui()
         self._setup_timers()
@@ -93,16 +80,6 @@ class MainWindow(QMainWindow):
         self._title_label = QLabel(tr("app_title"))
         self._title_label.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
         title_row.addWidget(self._title_label, stretch=1)
-
-        self._file_label = QLabel(tr("file_not_selected"))
-        self._file_label.setStyleSheet("color: #95a5a6; font-size: 9pt;")
-        title_row.addWidget(self._file_label)
-
-        if self._mode_type == "replay":
-            self._select_btn = QPushButton(tr("btn_select_file"))
-            self._select_btn.clicked.connect(self._on_select_file)
-            title_row.addWidget(self._select_btn)
-
         main_layout.addLayout(title_row)
 
         # Tab widget — always create all 3 tabs
@@ -120,7 +97,7 @@ class MainWindow(QMainWindow):
         ctrl_row = QHBoxLayout()
         ctrl_row.setContentsMargins(12, 4, 12, 8)
 
-        label = tr("btn_start_capture") if self._mode_type == "serial" else tr("btn_start_replay")
+        label = tr("btn_start_capture")
         self._start_btn = QPushButton(label)
         self._start_btn.setStyleSheet(
             "QPushButton { background-color: #27ae60; color: white; font-weight: bold; "
@@ -146,20 +123,19 @@ class MainWindow(QMainWindow):
         self._save_btn.clicked.connect(self._on_save)
         ctrl_row.addWidget(self._save_btn)
 
-        # Mode toggle button (serial only)
-        if self._mode_type == "serial":
-            self._mode_btn = QPushButton(
-                tr("btn_mode_bp") if isinstance(self._current_mode, HRMode)
-                else tr("btn_mode_hr")
-            )
-            self._mode_btn.setStyleSheet(
-                "QPushButton { background-color: #8e44ad; color: white; font-weight: bold; "
-                "padding: 8px 16px; border-radius: 4px; font-size: 10pt; }"
-                "QPushButton:hover { background-color: #9b59b6; }"
-                "QPushButton:disabled { background-color: #95a5a6; }"
-            )
-            self._mode_btn.clicked.connect(self._on_toggle_mode)
-            ctrl_row.addWidget(self._mode_btn)
+        # Mode toggle button
+        self._mode_btn = QPushButton(
+            tr("btn_mode_bp") if isinstance(self._current_mode, HRMode)
+            else tr("btn_mode_hr")
+        )
+        self._mode_btn.setStyleSheet(
+            "QPushButton { background-color: #8e44ad; color: white; font-weight: bold; "
+            "padding: 8px 16px; border-radius: 4px; font-size: 10pt; }"
+            "QPushButton:hover { background-color: #9b59b6; }"
+            "QPushButton:disabled { background-color: #95a5a6; }"
+        )
+        self._mode_btn.clicked.connect(self._on_toggle_mode)
+        ctrl_row.addWidget(self._mode_btn)
 
         ctrl_row.addStretch()
 
@@ -179,37 +155,24 @@ class MainWindow(QMainWindow):
         # Apply initial tab visibility
         self._update_tab_visibility()
 
-        # Auto-select latest file
-        if self._mode_type == "replay" and not self._replay_file:
-            self._replay_file = self._find_latest_bin()
-        if self._replay_file:
-            self._file_label.setText(os.path.basename(self._replay_file))
-            self._file_label.setStyleSheet("color: #3498db; font-size: 9pt;")
-
         I18n.instance().language_changed.connect(self.update_ui_texts)
 
     def update_ui_texts(self, _lang: str = "") -> None:
         self.setWindowTitle(tr("window_title"))
         self._title_label.setText(tr("app_title"))
-        self._file_label.setText(tr("file_not_selected"))
-        if hasattr(self, '_select_btn'):
-            self._select_btn.setText(tr("btn_select_file"))
         self._tabs.setTabText(0, tr("tab_subject"))
         self._tabs.setTabText(1, tr("tab_bp"))
         self._tabs.setTabText(2, tr("tab_research"))
-        label = tr("btn_start_capture") if self._mode_type == "serial" else tr("btn_start_replay")
-        self._start_btn.setText(label)
+        self._start_btn.setText(tr("btn_start_capture"))
         self._stop_btn.setText(tr("btn_stop"))
         self._save_btn.setText(tr("btn_save"))
         self._lang_menu.setTitle(tr("menu_language"))
         self._zh_action.setText(tr("lang_zh"))
         self._en_action.setText(tr("lang_en"))
-        # Update mode button text
-        if hasattr(self, '_mode_btn'):
-            self._mode_btn.setText(
-                tr("btn_mode_hr") if isinstance(self._current_mode, BPMode)
-                else tr("btn_mode_bp")
-            )
+        self._mode_btn.setText(
+            tr("btn_mode_hr") if isinstance(self._current_mode, BPMode)
+            else tr("btn_mode_bp")
+        )
 
     def _setup_timers(self) -> None:
         self._ui_timer = QTimer()
@@ -222,42 +185,17 @@ class MainWindow(QMainWindow):
         self._tabs.setTabVisible(1, show_bp)
         self._tabs.setTabVisible(2, show_research)
 
-    @staticmethod
-    def _find_latest_bin() -> str | None:
-        candidates = sorted(
-            glob.glob("data/*.bin"),
-            key=lambda f: os.path.getmtime(f),
-            reverse=True,
-        )
-        return candidates[0] if candidates else None
-
     # === Slots ===
 
-    def _on_select_file(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, tr("dialog_select_bin"), "data", "Bin Files (*.bin);;All Files (*)"
-        )
-        if path:
-            self._replay_file = path
-            self._file_label.setText(os.path.basename(path))
-            self._file_label.setStyleSheet("color: #3498db; font-size: 9pt;")
-
     def _on_start(self) -> None:
-        if self._mode_type == "serial":
-            self._start_serial()
-        else:
-            self._start_replay()
+        self._start_serial()
 
     def _start_serial(self) -> None:
         self._start_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
-        if hasattr(self, '_select_btn'):
-            self._select_btn.setEnabled(False)
-        if hasattr(self, '_mode_btn'):
-            self._mode_btn.setEnabled(False)
+        self._mode_btn.setEnabled(False)
         self._status_label.setText(tr("status_starting"))
         self._status_label.setStyleSheet("color: #f39c12;")
-        # Boot radar + start pipeline + start I/O on background thread
         thread = threading.Thread(target=self._serial_init_thread, daemon=True)
         thread.start()
 
@@ -328,50 +266,6 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 print(f"[Serial I/O] {e}")
                 time.sleep(0.5)
-
-    def _start_replay(self) -> None:
-        if not self._replay_file or not os.path.exists(self._replay_file):
-            QMessageBox.critical(self, tr("dialog_error"), tr("dialog_no_valid_file"))
-            return
-        reader = BinFileReader(self._replay_file)
-        if not reader.open():
-            QMessageBox.critical(self, tr("dialog_error"),
-                                 tr("dialog_cannot_open", self._replay_file))
-            return
-        self._bin_reader = reader
-        self._current_mode.start()
-        self._current_mode.clear_data()
-        self._start_time = time.time()
-        self._frame_count = 0
-        self._running = True
-        self._research_tab.start()
-        self._start_btn.setEnabled(False)
-        self._stop_btn.setEnabled(True)
-        if hasattr(self, '_select_btn'):
-            self._select_btn.setEnabled(False)
-        self._status_label.setText(tr("status_playing"))
-        self._status_label.setStyleSheet("color: #27ae60;")
-        self._replay_timer = QTimer()
-        self._replay_timer.timeout.connect(self._feed_one_frame)
-        self._replay_timer.start(50)
-
-    def _feed_one_frame(self) -> None:
-        if not self._bin_reader:
-            self._replay_timer.stop()
-            return
-        frames = self._bin_reader.read_frames(max_frames=1)
-        if not frames:
-            self._replay_timer.stop()
-            self._status_label.setText(tr("status_done"))
-            self._status_label.setStyleSheet("color: #3498db;")
-            self._stop_btn.setEnabled(False)
-            self._start_btn.setEnabled(True)
-            if hasattr(self, '_select_btn'):
-                self._select_btn.setEnabled(True)
-            return
-        self._frame_count += 1
-        frame = self._current_mode.build_frame(frames[0], self._frame_count)
-        self._current_mode.feed_frame(frame)
 
     def _on_toggle_mode(self) -> None:
         """Hot-switch between HR and BP monitoring modes (serial only)."""
@@ -446,43 +340,35 @@ class MainWindow(QMainWindow):
 
     def _on_stop(self) -> None:
         self._running = False
-        if self._mode_type == "serial":
-            if self._radar_mgr:
-                self._radar_mgr.shutdown()
-            if self._stop_event:
-                self._stop_event.set()
-            # Close serial to unblock read_data
-            if self._serial_mgr and self._serial_mgr.data_serial:
-                try:
-                    self._serial_mgr.data_serial.close()
-                except Exception:
-                    pass
-            if self._io_thread:
-                self._io_thread.join(timeout=5)
-            if self._serial_mgr:
-                self._serial_mgr.close()
-        if self._replay_timer:
-            self._replay_timer.stop()
-            self._replay_timer = None
+        if self._radar_mgr:
+            self._radar_mgr.shutdown()
+        if self._stop_event:
+            self._stop_event.set()
+        if self._serial_mgr and self._serial_mgr.data_serial:
+            try:
+                self._serial_mgr.data_serial.close()
+            except Exception:
+                pass
+        if self._io_thread:
+            self._io_thread.join(timeout=5)
+        if self._serial_mgr:
+            self._serial_mgr.close()
         self._current_mode.stop()
-        if self._bin_reader:
-            self._bin_reader.close()
-            self._bin_reader = None
         self._start_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
-        if hasattr(self, '_select_btn'):
-            self._select_btn.setEnabled(True)
-        if hasattr(self, '_mode_btn'):
-            self._mode_btn.setEnabled(True)
+        self._mode_btn.setEnabled(True)
         self._status_label.setText(tr("status_stopped"))
         self._status_label.setStyleSheet("color: #f39c12;")
 
     def _on_save(self) -> None:
+        is_bp = isinstance(self._current_mode, BPMode)
         formats = [
             tr("export_format_csv"),
             tr("export_format_hdf5"),
-            tr("export_format_edf"),
         ]
+        if not is_bp:
+            formats.append(tr("export_format_edf"))
+
         choice, ok = QInputDialog.getItem(
             self, tr("export_title"), "Format:", formats, 0, False,
         )
@@ -496,23 +382,33 @@ class MainWindow(QMainWindow):
         try:
             data = self._current_mode.get_export_data()
             if choice == tr("export_format_csv"):
-                vitals = data.get("latest_vitals")
-                breath = vitals.breath_waveform if vitals else np.array([])
-                heart = vitals.heart_waveform if vitals else np.array([])
-                export_csv(path, data.get("csv_rows", []), breath, heart)
+                if is_bp:
+                    export_bp_csv(path, data.get("csv_rows", []))
+                else:
+                    vitals = data.get("latest_vitals")
+                    breath = vitals.breath_waveform if vitals else np.array([])
+                    heart = vitals.heart_waveform if vitals else np.array([])
+                    export_csv(path, data.get("csv_rows", []), breath, heart)
             elif choice == tr("export_format_hdf5"):
-                breath_hist = (np.array(data["breath_waveform_accum"])
-                               if data.get("breath_waveform_accum") else np.array([]))
-                heart_hist = (np.array(data["heart_waveform_accum"])
-                              if data.get("heart_waveform_accum") else np.array([]))
-                metadata = {
-                    "device": "RS6240",
-                    "fs": 20,
-                    "session_duration_s": time.time() - self._start_time if self._start_time > 0 else 0,
-                }
-                export_hdf5(path, breath_hist, heart_hist,
-                            data.get("bpm_history", []),
-                            data.get("sqi_history", []), metadata)
+                if is_bp:
+                    metadata = {
+                        "device": "RS6240",
+                        "session_duration_s": time.time() - self._start_time if self._start_time > 0 else 0,
+                    }
+                    export_bp_hdf5(path, data.get("csv_rows", []), metadata)
+                else:
+                    breath_hist = (np.array(data["breath_waveform_accum"])
+                                   if data.get("breath_waveform_accum") else np.array([]))
+                    heart_hist = (np.array(data["heart_waveform_accum"])
+                                  if data.get("heart_waveform_accum") else np.array([]))
+                    metadata = {
+                        "device": "RS6240",
+                        "fs": 20,
+                        "session_duration_s": time.time() - self._start_time if self._start_time > 0 else 0,
+                    }
+                    export_hdf5(path, breath_hist, heart_hist,
+                                data.get("bpm_history", []),
+                                data.get("sqi_history", []), metadata)
             elif choice == tr("export_format_edf"):
                 vitals = data.get("latest_vitals")
                 breath = vitals.breath_waveform if vitals else np.array([])
@@ -537,8 +433,6 @@ class MainWindow(QMainWindow):
                 self._status_label.setStyleSheet("color: #e74c3c;")
                 self._start_btn.setEnabled(True)
                 self._stop_btn.setEnabled(False)
-                if hasattr(self, '_select_btn'):
-                    self._select_btn.setEnabled(True)
             else:
                 self._status_label.setText(f"● {s}")
                 self._status_label.setStyleSheet("color: #27ae60;")

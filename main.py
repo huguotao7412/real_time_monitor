@@ -1,7 +1,7 @@
-"""RS6240 毫米波雷达生命体征实时监测系统 — 离线回放模式
+"""RS6240 毫米波雷达生命体征实时监测系统 — 串口实时采集
 
-用法: python main.py [可选: .bin 文件路径]
-  不传参数则自动选择 data/ 目录下最新的 .bin 文件
+用法: python main.py [--bp]
+  --bp  以血压模式启动（默认心率模式）
 """
 
 import sys
@@ -11,25 +11,7 @@ from ui.main_window import MainWindow
 
 
 def main():
-    mode = "serial"
-    replay_file = None
-    bp_replay = False
-    args = sys.argv[1:]
-    i = 0
-    while i < len(args):
-        if args[i] in ("-r", "--replay"):
-            if i + 1 < len(args) and not args[i + 1].startswith("-"):
-                replay_file = args[i + 1]
-                i += 1
-            mode = "replay"
-        elif args[i] == "--bp":
-            bp_replay = True
-        elif args[i] in ("-s", "--serial"):
-            mode = "serial"
-        else:
-            replay_file = args[i]
-            mode = "replay"
-        i += 1
+    bp_mode = "--bp" in sys.argv
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
@@ -46,7 +28,7 @@ def main():
     palette.setColor(QPalette.ColorRole.HighlightedText, QColor(255, 255, 255))
     app.setPalette(palette)
 
-    window = MainWindow(mode=mode, replay_file=replay_file, bp_replay=bp_replay)
+    window = MainWindow(bp_mode=bp_mode)
     window.show()
     sys.exit(app.exec())
 

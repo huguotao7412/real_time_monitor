@@ -1,13 +1,13 @@
-"""Blood pressure monitoring tab — large SBP/DBP numbers + scrolling waveform."""
+"""Blood pressure monitoring tab — large SBP/DBP numbers + trend scatter plot."""
 
 import time
 
 import numpy as np
+import pyqtgraph as pg
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 
-from ui.wave_widget import WaveWidget
 from ui.subject_tab import HeartBeatIcon
 from config.i18n import tr, I18n
 
@@ -75,17 +75,19 @@ class BPTab(QWidget):
 
     Layout:
       - SBP / DBP large numbers (red/blue)
-      - Scrolling BP waveform (reuses WaveWidget)
+      - SBP/DBP trend scatter plot (pyqtgraph)
       - Bottom info bar: distance, confidence, time since last update
     """
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._last_update_time = time.time()
+        self._first_timestamp: float | None = None
 
-        # Rolling waveform display buffer (24 s history at 50 Hz)
-        self._display_buffer = np.zeros(1200, dtype=np.float32)
-        self._last_frame_index = 0
+        # Trend data caches (max 300 points)
+        self._trend_time: list[float] = []
+        self._trend_sbp: list[float] = []
+        self._trend_dbp: list[float] = []
 
         self._setup_ui()
 
@@ -118,13 +120,26 @@ class BPTab(QWidget):
         heart_row.addStretch()
         layout.addLayout(heart_row)
 
-        # --- Waveform ---
-        self._wave = WaveWidget(
-            title="", y_label="",
-            max_points=1200, fill_mode=True,
-            show_axes=False, show_grid=False,
+        # --- BP Trend Plot (replaces WaveWidget) ---
+        self._trend_plot = pg.PlotWidget(title="SBP / DBP Trend")
+        self._trend_plot.setBackground("transparent")
+        self._trend_plot.showGrid(x=True, y=True, alpha=0.3)
+        self._trend_plot.setLabel("left", "mmHg")
+        self._trend_plot.setLabel("bottom", "Time (s)")
+        self._trend_plot.setYRange(40, 180)
+        self._trend_plot.setXRange(0, 60)
+        # SBP: red scatter + line, DBP: blue scatter + line
+        self._sbp_curve = self._trend_plot.plot(
+            pen=pg.mkPen("#e74c3c", width=1.5),
+            symbol='o', symbolBrush='#e74c3c', symbolPen=None, symbolSize=5,
+            name="SBP",
         )
-        layout.addWidget(self._wave, stretch=1)
+        self._dbp_curve = self._trend_plot.plot(
+            pen=pg.mkPen("#3498db", width=1.5),
+            symbol='o', symbolBrush='#3498db', symbolPen=None, symbolSize=5,
+            name="DBP",
+        )
+        layout.addWidget(self._trend_plot, stretch=1)
 
         # --- Bottom info bar ---
         info_row = QHBoxLayout()
@@ -160,77 +175,42 @@ class BPTab(QWidget):
         self._sbp_panel._label.setText(tr("bp_sbp_label"))
         self._dbp_panel._label.setText(tr("bp_dbp_label"))
         self._dist_label.setText(tr("bp_dist_label"))
-        # Update confidence label text
-        for i in range(self._conf_dots.parent().layout().count()):
-            w = self._conf_dots.parent().layout().itemAt(i).widget()
-            if w and isinstance(w, QLabel) and w.text().startswith("Conf"):
-                w.setText(tr("bp_conf_label"))
 
     def update_display(self, bp_result) -> None:
-        """Accept BPResult and refresh all UI elements.
-
-        Args:
-            bp_result: BPResult dataclass from bp_monitor.bp_models
-        """
+        """Accept BPResult and refresh all UI elements."""
         now = time.time()
         self._last_update_time = now
 
         r = bp_result
 
-        # SBP / DBP
+        # Initialize first timestamp for relative time axis
+        if self._first_timestamp is None:
+            self._first_timestamp = r.timestamp
+
+        # SBP / DBP values
         self._sbp_panel.set_value(r.sbp)
         self._dbp_panel.set_value(r.dbp)
 
-        # === 2. 波形平滑拼接与边缘规避 (引入 0.5s 视觉延迟) ===
-        wf = r.bp_waveform
-        if wf.size > 0:
-            frames_diff = r.frame_index - self._last_frame_index
-            self._last_frame_index = r.frame_index
+        # Append to trend data (valid readings only)
+        if not np.isnan(r.sbp) and not np.isnan(r.dbp):
+            elapsed = r.timestamp - self._first_timestamp
+            self._trend_time.append(elapsed)
+            self._trend_sbp.append(r.sbp)
+            self._trend_dbp.append(r.dbp)
 
-            # 正常步进为 100 帧，下采样到 50Hz 为 25 个点
-            new_points_count = int(frames_diff * (50.0 / 200.0))
+            # Keep max 300 points rolling window
+            if len(self._trend_time) > 300:
+                self._trend_time.pop(0)
+                self._trend_sbp.pop(0)
+                self._trend_dbp.pop(0)
 
-            # --- 平滑策略参数 ---
-            DELAY_PTS = 25  # 视觉延迟 0.5 秒，彻底丢弃网络预测末端的发散扭曲区
-            FADE_PTS = 10  # 交叉淡入淡出的重叠点数，用于抹平基线跳变
-
-            if 0 < new_points_count <= (256 - DELAY_PTS - FADE_PTS):
-                # A. 截取安全区数据：避开最右侧边缘，并多取 FADE_PTS 个点用于重叠融合
-                fetch_len = new_points_count + FADE_PTS
-                safe_end = -DELAY_PTS
-                safe_start = safe_end - fetch_len
-                new_segment = wf[safe_start:safe_end]
-
-                # B. 显示缓冲左移，腾出新空间
-                self._display_buffer[:-new_points_count] = \
-                    self._display_buffer[new_points_count:]
-
-                # C. 执行 Cross-Fade (对旧波形尾部和新波形头部进行线性加权平滑)
-                seam_start = -new_points_count - FADE_PTS
-                seam_end = -new_points_count
-
-                old_edge = self._display_buffer[seam_start:seam_end]
-                new_edge = new_segment[:FADE_PTS]
-                weights = np.linspace(0, 1, FADE_PTS, dtype=np.float32)
-
-                self._display_buffer[seam_start:seam_end] = old_edge * (1 - weights) + new_edge * weights
-
-                # D. 填入剩余的纯新数据
-                self._display_buffer[-new_points_count:] = new_segment[FADE_PTS:]
-            else:
-                # 初始化或发生大跳跃时，安全回退策略
-                self._display_buffer[-256:] = wf
-
-            # E. 全局轻量级卷积平滑：去除拼接残余微小毛刺，保留舒张/收缩压峰值特征
-            kernel = np.array([0.2, 0.6, 0.2], dtype=np.float32)
-            smoothed_buffer = np.convolve(self._display_buffer, kernel, mode='same')
-
-            self._wave.set_data(smoothed_buffer)
+            self._sbp_curve.setData(self._trend_time, self._trend_sbp)
+            self._dbp_curve.setData(self._trend_time, self._trend_dbp)
 
         # Implicit heart rate from systolic peak count
         n_peaks = r.quality.get("n_peaks", 0) if r.quality else 0
         if n_peaks > 0:
-            implicit_hr = n_peaks / 5.12 * 60.0  # 1024 frames / 200 Hz = 5.12 s
+            implicit_hr = n_peaks / 5.12 * 60.0
             self._heart_icon.set_heart_bpm(implicit_hr, 0)
         else:
             self._heart_icon.set_heart_bpm(0, 0)
@@ -252,9 +232,12 @@ class BPTab(QWidget):
         """Clear all BP values to '--' state."""
         self._sbp_panel.set_value(float('nan'))
         self._dbp_panel.set_value(float('nan'))
-        self._display_buffer = np.zeros(1200, dtype=np.float32)
-        self._last_frame_index = 0
-        self._wave.set_data(np.array([], dtype=np.float32))
+        self._first_timestamp = None
+        self._trend_time.clear()
+        self._trend_sbp.clear()
+        self._trend_dbp.clear()
+        self._sbp_curve.setData([], [])
+        self._dbp_curve.setData([], [])
         self._dist_label.setText("Distance: --")
         self._conf_dots.set_confidence(0.0)
         self._update_label.setText("")

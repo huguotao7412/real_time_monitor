@@ -86,6 +86,9 @@ class Pipeline:
         self._cached_breath_wave: np.ndarray | None = None
         self._cached_heart_wave: np.ndarray | None = None
 
+        # Phase unwrapping continuity state (prevents 2π jumps across sliding windows)
+        self._last_unwrapped_phase: float | None = None
+
     @property
     def calibration_done(self) -> bool:
         return True
@@ -154,8 +157,8 @@ class Pipeline:
             if self._best_bin is None:
                 return None
         elif self._frame_count > 0 and self._frame_count % self._cfar_rescan_interval == 0:
-            new_bin, new_snr = self._run_2d_cfar_rescan()
-            if new_bin is not None and new_snr > self._current_bin_snr * 1.5:
+            new_bin, new_snr, current_actual_snr = self._run_2d_cfar_rescan()
+            if new_bin is not None and current_actual_snr > 0 and new_snr > current_actual_snr * 1.5:
                 self._best_bin = new_bin
                 self._current_bin_snr = new_snr
 
@@ -214,24 +217,37 @@ class Pipeline:
         best_bin = find_best_range_bin(mean_bin_frame_rx, fs=FS_HZ)
         return best_bin, 0.0
 
-    def _run_2d_cfar_rescan(self) -> tuple[int | None, float]:
-        """Periodic re-scan using rolling buffer. Returns (new_bin, snr) or (None, 0)."""
+    def _run_2d_cfar_rescan(self) -> tuple[int | None, float, float]:
+        """Periodic re-scan using rolling buffer.
+
+        Returns (new_bin, new_snr, current_actual_snr). current_actual_snr is the
+        SNR of self._best_bin measured from the rolling buffer data at this moment.
+        """
         cubes = list(self._cfar_rolling_buffer)
         if len(cubes) < 20:
-            return None, 0.0
+            return None, 0.0, 0.0
         mean_bin_frame_rx = self._build_mean_bin_frame_rx(cubes)
         candidates = coarse_1d_cfar_candidates(mean_bin_frame_rx)
         _, _, debug, _ = adaptive_2d_cfar(
             mean_bin_frame_rx, self.DISTANCE_PER_BIN, self._cfar_state, candidates
         )
         confirmed = debug.get("confirmed_list", np.array([]))
+
+        # Compute current best_bin's actual SNR from the rolling buffer
+        current_actual_snr = 0.0
+        if len(confirmed) > 0:
+            for entry in confirmed:
+                if int(entry[0]) == self._best_bin:
+                    current_actual_snr = float(entry[2])
+                    break
+
         if len(confirmed) > 0:
             best_idx = np.argmin(confirmed[:, 0])
             best_bin = int(confirmed[best_idx, 0])
             snr = float(confirmed[best_idx, 2])
             if best_bin != self._best_bin:
-                return best_bin, snr
-        return None, 0.0
+                return best_bin, snr, current_actual_snr
+        return None, 0.0, current_actual_snr
 
     def _beamforming_path(self, update_angle: bool) -> np.ndarray | None:
         """Run MUSIC + LCMV on the RX buffer. Returns displacement [200] or None."""
@@ -262,12 +278,25 @@ class Pipeline:
             return self._fallback_phase_path()
 
     def _fallback_phase_path(self) -> np.ndarray:
-        """Existing simple phase path: unwrap -> detrend.
+        """Simple phase path: unwrap with cross-frame continuity -> detrend.
+
+        The sliding window shifts by 1 sample per frame. Independent np.unwrap
+        on each window causes 2π jumps between frames. We align overlapping
+        samples to produce a temporally continuous phase stream.
 
         Returns displacement-like array for downstream compatibility.
         """
         phase_arr = np.array(self._phase_buffer)
         unwrapped = unwrap_phase(phase_arr)
+
+        if self._last_unwrapped_phase is not None:
+            # unwrapped[-2] and _last_unwrapped_phase represent the same raw
+            # sample (the window shifted by 1). Align to remove any 2π jump.
+            offset = self._last_unwrapped_phase - unwrapped[-2]
+            n2pi = np.round(offset / (2 * np.pi)) * (2 * np.pi)
+            unwrapped = unwrapped + n2pi
+
+        self._last_unwrapped_phase = unwrapped[-1]
         return remove_dc(unwrapped)
 
     def _advanced_dsp_path(
@@ -427,7 +456,7 @@ class Pipeline:
 
             self._last_bpm_update = self._frame_count
 
-        quality = self._check_quality(enhanced)
+        quality = self._check_quality(no_dc)
 
         quality["phase_range"] = phase_range
         quality["breath_ratio"] = breath_power_ratio

@@ -245,3 +245,76 @@ def export_edf(
         writer.writeSamples(signal_data.astype(np.int16))
 
     return edf_path
+
+
+def export_bp_csv(path: str, csv_rows: list[dict]) -> str:
+    """Export blood pressure session data as CSV.
+
+    Args:
+        path: output directory path.
+        csv_rows: list of dicts with keys Timestamp, FrameIndex, SBP, DBP,
+                  Distance_m, Confidence.
+
+    Returns the written file path.
+    """
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    csv_path = os.path.join(path, f"bp_vital_signs_{ts}.csv")
+    if csv_rows:
+        fieldnames = list(csv_rows[0].keys())
+        with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(csv_rows)
+    return csv_path
+
+
+def export_bp_hdf5(
+    path: str,
+    csv_rows: list[dict],
+    metadata: dict | None = None,
+) -> str:
+    """Export blood pressure session data as structured HDF5 file.
+
+    Args:
+        path: output directory path.
+        csv_rows: list of dicts with SBP/DBP readings.
+        metadata: optional dict with device, session_duration_s.
+
+    Returns the written HDF5 file path.
+    """
+    try:
+        import h5py
+    except ImportError:
+        raise ImportError(
+            "h5py is required for HDF5 export. Install with: pip install h5py"
+        )
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    h5_path = os.path.join(path, f"bp_vital_signs_{ts}.h5")
+
+    with h5py.File(h5_path, "w") as f:
+        meta = f.create_group("metadata")
+        meta.attrs["export_timestamp"] = datetime.now().isoformat()
+        meta.attrs["format_version"] = "1.0"
+        meta.attrs["device_model"] = (metadata or {}).get("device", "RS6240")
+        meta.attrs["mode"] = "blood_pressure"
+        if metadata and "session_duration_s" in metadata:
+            meta.attrs["session_duration_s"] = metadata["session_duration_s"]
+
+        if csv_rows:
+            vs = f.create_group("vital_signs")
+            frame_indices = np.array([r["FrameIndex"] for r in csv_rows], dtype=np.int32)
+            sbp_arr = np.array([r["SBP"] for r in csv_rows], dtype=np.float32)
+            dbp_arr = np.array([r["DBP"] for r in csv_rows], dtype=np.float32)
+            distances = np.array([r["Distance_m"] for r in csv_rows], dtype=np.float32)
+            confidences = np.array([r["Confidence"] for r in csv_rows], dtype=np.float32)
+
+            vs.create_dataset("frame_index", data=frame_indices, compression="gzip")
+            vs.create_dataset("sbp", data=sbp_arr, compression="gzip")
+            vs["sbp"].attrs["unit"] = "mmHg"
+            vs.create_dataset("dbp", data=dbp_arr, compression="gzip")
+            vs["dbp"].attrs["unit"] = "mmHg"
+            vs.create_dataset("distance_m", data=distances, compression="gzip")
+            vs.create_dataset("confidence", data=confidences, compression="gzip")
+
+    return h5_path

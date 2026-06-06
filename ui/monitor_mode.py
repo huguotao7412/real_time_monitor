@@ -195,10 +195,10 @@ class HRMode(MonitorMode):
         # Waveform accumulation
         if self._latest_vitals.breath_waveform.size > 0:
             self._breath_waveform_accum.append(
-                self._latest_vitals.breath_waveform.copy())
+                self._latest_vitals.breath_waveform[-1])
         if self._latest_vitals.heart_waveform.size > 0:
             self._heart_waveform_accum.append(
-                self._latest_vitals.heart_waveform.copy())
+                self._latest_vitals.heart_waveform[-1])
 
         # CSV row accumulation (once per second)
         if trend_sample and q is not None:
@@ -281,6 +281,7 @@ class BPMode(MonitorMode):
         self._pipeline = None  # type: ignore  # BPPipeline
         self._latest_bp_result = None  # type: ignore  # BPResult
         self._bp_results: deque = deque(maxlen=720)  # ~1 hour at 5 s/batch
+        self._csv_rows: deque = deque(maxlen=3600)  # ~1 hour at 1 row/s
 
     # -- MonitorMode impl ------------------------------------------------
 
@@ -335,8 +336,21 @@ class BPMode(MonitorMode):
             pass
 
         if self._latest_bp_result is not None:
-            bp_tab.update_display(self._latest_bp_result)
-            self._bp_results.append(self._latest_bp_result)
+            r = self._latest_bp_result
+            bp_tab.update_display(r)
+            self._bp_results.append(r)
+
+            # Record valid BP readings for export
+            if not np.isnan(r.sbp):
+                self._csv_rows.append({
+                    "Timestamp": datetime.now().isoformat(),
+                    "FrameIndex": r.frame_index,
+                    "SBP": round(r.sbp, 2),
+                    "DBP": round(r.dbp, 2),
+                    "Distance_m": round(r.target_distance_m, 2),
+                    "Confidence": round(r.quality.get("confidence", 0.0), 4) if r.quality else 0.0,
+                })
+
             status_label.setText("● Monitoring")
             status_label.setStyleSheet("color: #27ae60;")
 
@@ -345,9 +359,11 @@ class BPMode(MonitorMode):
 
     def get_export_data(self) -> dict:
         return {
+            "csv_rows": list(self._csv_rows),
             "bp_results": list(self._bp_results),
         }
 
     def clear_data(self) -> None:
         self._bp_results.clear()
+        self._csv_rows.clear()
         self._latest_bp_result = None
