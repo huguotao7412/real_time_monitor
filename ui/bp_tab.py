@@ -207,6 +207,11 @@ class BPTab(QWidget):
             self._sbp_curve.setData(self._trend_time, self._trend_sbp)
             self._dbp_curve.setData(self._trend_time, self._trend_dbp)
 
+            if elapsed > 60:
+                self._trend_plot.setXRange(elapsed - 60, elapsed)
+            else:
+                self._trend_plot.setXRange(0, 60)
+
         # Implicit heart rate from systolic peak count
         n_peaks = r.quality.get("n_peaks", 0) if r.quality else 0
         if n_peaks > 0:

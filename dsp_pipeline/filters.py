@@ -19,8 +19,8 @@ class VitalSignFilter:
         # 心跳: 0.8-2.5 Hz, 4阶
         self.sos_heart = butter(4, [0.8, 2.5], btype="band", fs=fs, output="sos")
 
-        # 综合: 0.08-1.8 Hz, 10阶 (MATLAB MUSIC 预滤波)
-        self.sos_all = butter(10, [0.08, 1.8], btype="band", fs=fs, output="sos")
+        # 综合: 0.08-2.5 Hz, 10阶 (MATLAB MUSIC 预滤波, 上限对齐心跳频带)
+        self.sos_all = butter(10, [0.08, 2.5], btype="band", fs=fs, output="sos")
 
     def filter_breath(self, x: np.ndarray) -> np.ndarray:
         return sosfiltfilt(self.sos_breath, x)
@@ -34,13 +34,15 @@ class VitalSignFilter:
 
 # 保留旧接口兼容
 def remove_dc(signal: np.ndarray, window: int = 200) -> np.ndarray:
-    """Remove DC component by subtracting global mean.
+    """Remove DC component via zero-phase high-pass filter.
 
-    For short windows (~200 samples for vital signs), global mean is preferred
-    over rolling mean, which acts as a high-pass filter and attenuates slow
-    breath signals below 0.1 Hz.
+    Uses 2nd-order Butterworth high-pass at 0.05 Hz with forward-backward
+    filtering to eliminate window-edge artifacts that a simple mean subtraction
+    would introduce.
     """
-    return signal - np.mean(signal)
+    from scipy.signal import filtfilt
+    b, a = butter(2, 0.05 / (20.0 / 2), btype='high')
+    return filtfilt(b, a, signal)
 
 
 def butter_bandpass(signal, lowcut, highcut, fs=20.0, order=4):

@@ -6,6 +6,7 @@ Reconstructs signals by summing frequency-ordered nodes in the target bands.
 
 import numpy as np
 import pywt
+from scipy.signal import savgol_filter
 
 
 def _compute_wpd_level(signal_len: int) -> int:
@@ -53,7 +54,10 @@ def _reconstruct_band(
 
     for leaf in leaf_nodes:
         if leaf.path not in all_target_leaves:
-            leaf.data[:] = 0.0
+            n_leaf = len(leaf.data)
+            if n_leaf > 0:
+                window = np.hanning(n_leaf)
+                leaf.data[:] = leaf.data * (1.0 - window)
 
     result = wp.reconstruct(update=False)
 
@@ -100,11 +104,11 @@ def wpd_separate(
     except Exception:
         breath_wave = signal.copy()
 
-    # Heart: sym8 wavelet, on diff(input) (MATLAB: sig_heart_pre = diff(FiltedData))
+    # Heart: sym8 wavelet, on SG derivative (MATLAB: sig_heart_pre = diff(FiltedData))
     if heart_input_signal is None:
-        heart_input = np.diff(signal, prepend=signal[0])
+        heart_input = savgol_filter(signal, window_length=9, polyorder=3, deriv=1)
     else:
-        heart_input = np.diff(heart_input_signal, prepend=heart_input_signal[0])
+        heart_input = savgol_filter(heart_input_signal, window_length=9, polyorder=3, deriv=1)
 
     try:
         wp_heart = pywt.WaveletPacket(

@@ -296,7 +296,7 @@ def estimate_bpm_stft(
             breath_bpm = estimate_breath_bpm_time_domain(breath_signal, fs)
 
     # --- Heart STFT (MATLAB: 25% hamming, 80% overlap) ---
-    heart_win = max(32, int(n // 4))
+    heart_win = max(64, int(n * 0.6))
     heart_overlap = int(heart_win * 0.8)
     nfft_h = max(n_fft, 2 ** int(np.ceil(np.log2(heart_win))))
 

@@ -21,7 +21,7 @@ from dsp_pipeline.music_angle import estimate_angle_music
 from dsp_pipeline.lcmv_beamformer import lcmv_displacement
 from dsp_pipeline.emd_cleaner import emd_harmonic_clean
 from dsp_pipeline.wpd_filter import wpd_separate
-from scipy.signal import sosfiltfilt
+from scipy.signal import sosfiltfilt, savgol_filter
 
 
 class Pipeline:
@@ -324,7 +324,7 @@ class Pipeline:
             )
         except Exception:
             no_dc = remove_dc(filted)
-            enhanced = np.diff(no_dc, prepend=no_dc[0])
+            enhanced = savgol_filter(no_dc, window_length=9, polyorder=3, deriv=1)
             breath_wave = self._filter.filter_breath(no_dc)
             heart_wave = self._filter.filter_heart(enhanced)
 
@@ -354,7 +354,7 @@ class Pipeline:
             return None
 
         no_dc = remove_dc(displacement)
-        enhanced = np.diff(no_dc, prepend=no_dc[0])
+        enhanced = savgol_filter(no_dc, window_length=9, polyorder=3, deriv=1)
 
         # SOS 带通滤波: 呼吸用原始位移防振铃分裂, 心跳用差分放大高频脉冲
         breath_signal = self._filter.filter_breath(no_dc)
