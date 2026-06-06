@@ -21,7 +21,7 @@ def estimate_bpm(
         return 0.0, 0.0
 
     t = np.arange(n)
-    poly = np.polyfit(t, signal, 1)  # 线性去趋势 (原为三次)
+    poly = np.polyfit(t, signal, 3)  # 三次去趋势 (MATLAB: detrend(signal, 3))
     detrended = signal - np.polyval(poly, t)
 
     windowed = detrended * np.hanning(n)
@@ -206,93 +206,69 @@ def fft_peak_to_bpm(signal, fs=20.0, valid_band=(0.1, 3.0)):
     return bpm
 
 
-# === 自相关 BPM 估计 (行业标准: 对类周期呼吸波形远优于 FFT) ===
+# === 无偏自相关呼吸 BPM (行业标准: 整个窗口算一个周期, 无 STFT 列数限制) ===
 
 def estimate_bpm_autocorr(
     signal: np.ndarray,
     fs: float,
     valid_band: tuple[float, float],
-) -> tuple[float, float]:
-    """Estimate BPM via unbiased autocorrelation period detection.
+) -> float:
+    """Unbiased autocorrelation period detection for breath rate.
 
-    Directly measures the dominant period by finding the first significant
-    ACF peak. Far more robust than FFT for quasi-periodic, non-sinusoidal
-    breathing waveforms — insensitive to harmonic energy distribution.
-
-    Args:
-        signal: 1D real-valued waveform.
-        fs: Sampling rate in Hz.
-        valid_band: (lo, hi) frequency range in Hz.
-
-    Returns:
-        (bpm, confidence) where confidence ∈ [0, 1].
+    Uses ALL data points for one robust period estimate — no STFT column-count
+    problem. Unbiased normalization compensates the triangular window that
+    otherwise attenuates longer lags (slower breathing).
     """
     n = len(signal)
     if n < fs * 2:
-        return 0.0, 0.0
+        return 0.0
 
     t = np.arange(n)
     detrended = signal - np.polyval(np.polyfit(t, signal, 1), t)
 
-    # Unbiased autocorrelation
     acf = np.correlate(detrended, detrended, mode='full')
     acf = acf[n - 1:]
+
+    # Unbiased: compensate triangular window (acf[lag] *= n/(n-lag))
+    for lag in range(len(acf)):
+        denom = n - lag
+        if denom > 0:
+            acf[lag] /= denom
     acf = acf / (acf[0] + 1e-10)
 
     lo_hz, hi_hz = valid_band
     min_lag = max(1, int(fs / hi_hz))
     max_lag = min(n - 1, int(fs / lo_hz))
 
-    if min_lag >= max_lag or max_lag >= len(acf):
-        return 0.0, 0.0
+    if min_lag >= max_lag:
+        return 0.0
 
     acf_roi = acf[min_lag:max_lag + 1]
 
     from scipy.signal import find_peaks
-    peaks, props = find_peaks(acf_roi, height=0.15, distance=max(1, min_lag // 2))
+    peaks, _ = find_peaks(acf_roi, height=0.2, distance=max(1, min_lag // 2))
 
     if len(peaks) == 0:
         best_offset = np.argmax(acf_roi)
-        best_lag = min_lag + best_offset
-        confidence = max(0.0, float(acf[best_lag]))
+        best_lag = float(min_lag + best_offset)
     else:
-        best_rel = peaks[np.argmax(props['peak_heights'])]
-        best_lag = min_lag + best_rel
-        confidence = min(1.0, float(props['peak_heights'][np.argmax(props['peak_heights'])]))
+        best_lag = float(min_lag + peaks[0])  # first significant peak
+
+    # Parabolic interpolation: sub-sample period accuracy
+    best_lag_int = int(best_lag)
+    if 0 < best_lag_int < len(acf) - 1:
+        y0, y1, y2 = acf[best_lag_int - 1], acf[best_lag_int], acf[best_lag_int + 1]
+        denom = 2.0 * (2.0 * y1 - y0 - y2)
+        if abs(denom) > 1e-10:
+            best_lag += (y0 - y2) / denom
 
     period_sec = best_lag / fs
     bpm = 60.0 / period_sec
 
     if bpm < lo_hz * 60 or bpm > hi_hz * 60:
-        return 0.0, 0.0
-
-    return bpm, confidence
-
-
-def _consensus_breath_bpm(breath_signal: np.ndarray, fs: float) -> float:
-    """Multi-method consensus breath BPM: autocorr + FFT + time-domain.
-
-    Each method contributes one vote. The median is robust to single-method
-    outliers (e.g. FFT locking onto a harmonic while autocorr stays on track).
-    """
-    estimates: list[float] = []
-
-    ac_bpm, ac_conf = estimate_bpm_autocorr(breath_signal, fs, (0.1, 0.8))
-    if ac_bpm > 0 and ac_conf > 0.1:
-        estimates.append(ac_bpm)
-
-    fft_bpm, fft_prom = estimate_bpm(breath_signal, fs, (0.1, 0.8), n_fft=2048)
-    if fft_bpm > 0 and fft_prom > 0.15:
-        estimates.append(fft_bpm)
-
-    td_bpm = estimate_breath_bpm_time_domain(breath_signal, fs)
-    if td_bpm > 0:
-        estimates.append(td_bpm)
-
-    if not estimates:
         return 0.0
 
-    return float(np.median(estimates))
+    return bpm
 
 
 # === STFT + Kalman hybrid BPM estimation (MATLAB PhaseProcess port) ===
@@ -303,22 +279,8 @@ def estimate_bpm_stft(
     fs: float = 20.0,
     n_fft: int = 1024,
 ) -> tuple[float, float]:
-    """STFT-based BPM estimation with Kalman smoothing and FFT hybrid.
-
-    Port of PhaseProcess.perform_stft_analysis + estimate_vital_signs_from_stft.
-
-    Breath: STFT ridge extraction -> Kalman filter -> mean frequency * 60.
-    Heart: STFT ridge -> Kalman -> sort & trim top 4 -> mean,
-           then min(STFT_KF, FFT_peak) as upper bound.
-
-    Args:
-        breath_signal: WPD-reconstructed breath waveform.
-        heart_signal: WPD-reconstructed heart waveform.
-        fs: Sampling rate.
-        n_fft: Base FFT size for STFT.
-
-    Returns:
-        (breath_bpm, heart_bpm)
+    """Breath: unbiased autocorrelation + time-domain fallback.
+    Heart: STFT ridge -> Kalman -> trim -> min(STFT, FFT).
     """
     from scipy.signal import stft
 
@@ -326,13 +288,13 @@ def estimate_bpm_stft(
     if n < 64:
         return 0.0, 0.0
 
-    # --- Breath: 三法共识 (自相关 + FFT + 时域) ---
-    # 替换原 STFT 脊线法: 200点窗口仅产生~2个STFT时间列,
-    # 频率分辨率不足导致帧间剧烈跳动。自相关直接测周期,天然抗谐波。
-    breath_bpm = _consensus_breath_bpm(breath_signal, fs)
+    # --- Breath: 无偏自相关 (全窗口单次周期估计, 无 STFT 2列瓶颈) ---
+    breath_bpm = estimate_bpm_autocorr(breath_signal, fs, (0.1, 0.8))
+    if breath_bpm <= 0:
+        breath_bpm = estimate_breath_bpm_time_domain(breath_signal, fs)
 
-    # --- Heart STFT ---
-    heart_win = max(64, int(n * 0.6))
+    # --- Heart STFT (MATLAB: 25% hamming, 80% overlap) ---
+    heart_win = max(32, int(n // 4))
     heart_overlap = int(heart_win * 0.8)
     nfft_h = max(n_fft, 2 ** int(np.ceil(np.log2(heart_win))))
 
@@ -342,10 +304,10 @@ def estimate_bpm_stft(
     )
     mag_h = np.abs(Zxx_h)
 
-    heart_bpm_stft = _extract_bpm_from_stft(f_h, mag_h, (0.8, 2.5), 'heart')
+    heart_bpm_stft = _extract_bpm_from_stft(f_h, mag_h, (1.0, 2.0), 'heart')
 
-    # FFT fallback for heart: upper bound
-    heart_fft_bpm, _ = estimate_bpm(heart_signal, fs, (0.8, 2.5))
+    # FFT fallback for heart: upper bound (MATLAB: 1.0-2.5 Hz)
+    heart_fft_bpm, _ = estimate_bpm(heart_signal, fs, (1.0, 2.5))
 
     if heart_bpm_stft > 0 and heart_fft_bpm > 0:
         heart_bpm = min(heart_bpm_stft, heart_fft_bpm)

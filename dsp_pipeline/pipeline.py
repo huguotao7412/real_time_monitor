@@ -77,10 +77,7 @@ class Pipeline:
         self._breath_ema: float = 0.0
         self._heart_ema: float = 0.0
 
-        # 迟滞锁定: 防止小幅抖动导致显示值上下浮动
-        self._breath_locked: bool = False
-        self._breath_lock_bpm: float = 0.0
-        self._breath_lock_count: int = 0
+        # 自适应 Kalman: 心率 prominence 历史
 
         # 自适应 Kalman: 心率 prominence 历史
         self._heart_prominence_history: list[float] = []
@@ -276,40 +273,43 @@ class Pipeline:
     def _advanced_dsp_path(
         self, displacement: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray, float, float]:
-        """EMD -> WPD -> STFT chain. Returns (breath_wave, heart_wave, breath_bpm, heart_bpm).
-
-        Each stage has independent try-catch fallback to existing SOS/FFT behavior.
-        """
+        """SOS → WPD (breath: no EMD, heart: EMD) → BPM. MATLAB PhaseProcess port."""
         # SOS pre-filter (MATLAB: filterObj.apply_all_filter)
         try:
             filted = sosfiltfilt(self._filter.sos_all, displacement)
         except Exception:
             filted = displacement.copy()
 
-        # EMD harmonic cancellation
+        # Heart-only EMD: remove breath harmonics from heart band (MATLAB BP pipeline)
+        # Breath skips EMD — its harmonics are the signal, not interference
+        heart_clean = filted
         try:
-            clean = emd_harmonic_clean(filted, FS_HZ)
+            heart_clean = emd_harmonic_clean(filted, FS_HZ)
         except Exception:
-            clean = filted
+            pass
 
-        # WPD separation
+        # WPD: breath from raw SOS, heart from EMD-cleaned
         try:
-            breath_wave, heart_wave = wpd_separate(clean, FS_HZ)
+            breath_wave, heart_wave = wpd_separate(
+                filted, FS_HZ, heart_input_signal=heart_clean
+            )
         except Exception:
-            no_dc = remove_dc(clean)
+            no_dc = remove_dc(filted)
             enhanced = np.diff(no_dc, prepend=no_dc[0])
-            breath_wave = self._filter.filter_breath(enhanced)
+            breath_wave = self._filter.filter_breath(no_dc)
             heart_wave = self._filter.filter_heart(enhanced)
 
-        # STFT + Kalman BPM estimation
+        # BPM estimation: FFT breath + STFT heart (MATLAB PhaseProcess port)
         try:
             breath_bpm, heart_bpm = estimate_bpm_stft(
                 breath_wave, heart_wave, FS_HZ
             )
         except Exception:
             breath_bpm, _ = estimate_bpm(
-                breath_wave, FS_HZ, (0.1, 0.8), n_fft=1024
+                breath_wave, FS_HZ, (0.1, 0.8), n_fft=4096
             )
+            if breath_bpm <= 0:
+                breath_bpm = estimate_breath_bpm_time_domain(breath_wave, FS_HZ)
             f0 = breath_bpm / 60.0 if breath_bpm > 0 else 0.0
             heart_bpm, _ = estimate_bpm(
                 heart_wave, FS_HZ, (1.0, 2.5), f0=f0
@@ -372,41 +372,30 @@ class Pipeline:
                     breath_bpm = adv_breath_bpm
                     heart_bpm = adv_heart_bpm
 
-                    # 呼吸: 中值去飞点 → 迟滞锁 (类周期信号锁优于递推卡尔曼)
-                    # 心率: 保留原 Kalman 管线 (心跳周期短, 需更多平滑)
-                    _max_heart_delta = 25.0 * (BPM_UPDATE_INTERVAL / FS_HZ)
-
+                    # 中值去飞点 → Kalman 平滑 → EMA 稳显示
                     if breath_bpm > 0:
                         self._breath_raw_history.append(breath_bpm)
-                        breath_bpm_median = float(np.median(list(self._breath_raw_history)))
-                        breath_bpm = self._apply_breath_hysteresis(breath_bpm_median)
+                        breath_bpm = float(np.median(list(self._breath_raw_history)))
+                        self._breath_history.append(breath_bpm)
+                        if len(self._breath_history) > 12:
+                            self._breath_history = self._breath_history[-12:]
+                        breath_bpm = kalman_smooth(self._breath_history, q=1e-4, r=0.1)
                         self._last_valid_breath_bpm = breath_bpm
 
                     if heart_bpm > 0:
-                        # 1. 3点中值
                         self._heart_raw_history.append(heart_bpm)
-                        heart_bpm_median = float(np.median(list(self._heart_raw_history)))
-                        # 2. 放宽限幅
-                        if self._last_valid_heart_bpm > 0:
-                            heart_bpm_median = float(np.clip(
-                                heart_bpm_median,
-                                self._last_valid_heart_bpm - _max_heart_delta,
-                                self._last_valid_heart_bpm + _max_heart_delta,
-                            ))
-                        self._last_valid_heart_bpm = heart_bpm_median
-                        # 3. 高响应Kalman
-                        self._heart_history.append(heart_bpm_median)
+                        heart_bpm = float(np.median(list(self._heart_raw_history)))
+                        self._heart_history.append(heart_bpm)
                         if len(self._heart_history) > 10:
                             self._heart_history = self._heart_history[-10:]
-                        heart_bpm = kalman_smooth(self._heart_history, q=0.05, r=0.2)
+                        heart_bpm = kalman_smooth(self._heart_history, q=1e-3, r=0.5)
+                        self._last_valid_heart_bpm = heart_bpm
                     self._cached_breath_wave = adv_breath
                     self._cached_heart_wave = adv_heart
                 except Exception:
                     self._use_advanced_dsp = False
 
             if not self._use_advanced_dsp or breath_bpm <= 0:
-                _max_heart_delta = 25.0 * (BPM_UPDATE_INTERVAL / FS_HZ)
-
                 breath_bpm = estimate_breath_bpm_time_domain(
                     breath_signal, fs=FS_HZ, min_interval_sec=1.5
                 )
@@ -416,34 +405,25 @@ class Pipeline:
                     )
                 if breath_bpm > 0:
                     self._breath_raw_history.append(breath_bpm)
-                    breath_bpm_median = float(np.median(list(self._breath_raw_history)))
-                    breath_bpm = self._apply_breath_hysteresis(breath_bpm_median)
+                    breath_bpm = float(np.median(list(self._breath_raw_history)))
+                    self._breath_history.append(breath_bpm)
+                    if len(self._breath_history) > 12:
+                        self._breath_history = self._breath_history[-12:]
+                    breath_bpm = kalman_smooth(self._breath_history, q=1e-4, r=0.1)
                     self._last_valid_breath_bpm = breath_bpm
 
                 f0 = breath_bpm / 60.0 if breath_bpm > 0 else 0.0
                 heart_bpm_raw, prominence = estimate_bpm(
-                    heart_signal, FS_HZ, (0.8, 2.5), f0=f0
+                    heart_signal, FS_HZ, (1.0, 2.5), f0=f0
                 )
                 if heart_bpm_raw > 0:
                     self._heart_raw_history.append(heart_bpm_raw)
-                    heart_bpm_median = float(np.median(list(self._heart_raw_history)))
-                    if self._last_valid_heart_bpm > 0:
-                        heart_bpm_median = float(np.clip(
-                            heart_bpm_median,
-                            self._last_valid_heart_bpm - _max_heart_delta,
-                            self._last_valid_heart_bpm + _max_heart_delta,
-                        ))
-                    self._last_valid_heart_bpm = heart_bpm_median
-                    self._heart_history.append(heart_bpm_median)
-                    self._heart_prominence_history.append(prominence)
+                    heart_bpm = float(np.median(list(self._heart_raw_history)))
+                    self._heart_history.append(heart_bpm)
                     if len(self._heart_history) > 10:
                         self._heart_history = self._heart_history[-10:]
-                    if len(self._heart_prominence_history) > 10:
-                        self._heart_prominence_history = self._heart_prominence_history[-10:]
-                    heart_bpm = kalman_smooth(
-                        self._heart_history, q=0.05, r=0.2,
-                        prominences=self._heart_prominence_history,
-                    )
+                    heart_bpm = kalman_smooth(self._heart_history, q=1e-3, r=0.5)
+                    self._last_valid_heart_bpm = heart_bpm
 
             self._last_bpm_update = self._frame_count
 
@@ -459,27 +439,16 @@ class Pipeline:
             breath_signal_display = np.array([])
             heart_signal_display = np.array([])
 
-        # --- EMA 平滑 + 生理区间拦截 ---
-        # 呼吸 [8, 45] BPM, 动态 α: 变化>5→α=0.5 快响应, 稳定→α=0.15 锁数值
-        if 8 <= breath_bpm <= 45:
-            delta = abs(breath_bpm - self._breath_ema) if self._breath_ema > 0 else 99
-            alpha = 0.5 if delta > 5 else 0.15
-            self._breath_ema = (1 - alpha) * self._breath_ema + alpha * breath_bpm
+        # EMA 终段: 慢速显示平滑 (α=0.1, Kalman 之后再做轻量平均)
+        if breath_bpm > 0:
+            self._breath_ema = 0.9 * self._breath_ema + 0.1 * breath_bpm
             breath_bpm = self._breath_ema
-        elif breath_bpm > 0:
-            breath_bpm = self._breath_ema if self._breath_ema > 0 else breath_bpm
-        if breath_bpm == 0:
+        else:
             self._breath_ema = 0.0
-
-        # 心率 [48, 150] BPM, 动态 α: 变化>10→α=0.5 快响应, 稳定→α=0.2
-        if 48 <= heart_bpm <= 150:
-            delta = abs(heart_bpm - self._heart_ema) if self._heart_ema > 0 else 99
-            alpha = 0.5 if delta > 10 else 0.2
-            self._heart_ema = (1 - alpha) * self._heart_ema + alpha * heart_bpm
+        if heart_bpm > 0:
+            self._heart_ema = 0.9 * self._heart_ema + 0.1 * heart_bpm
             heart_bpm = self._heart_ema
-        elif heart_bpm > 0:
-            heart_bpm = self._heart_ema if self._heart_ema > 0 else heart_bpm
-        if heart_bpm == 0:
+        else:
             self._heart_ema = 0.0
 
         self.last_heartbeat = time.time()
@@ -492,39 +461,6 @@ class Pipeline:
             heart_waveform=heart_signal_display,
             quality=quality,
         )
-
-    def _apply_breath_hysteresis(self, bpm: float) -> float:
-        """迟滞锁定: 3次±3 BPM稳定→锁定, 锁定态偏离>5 BPM才更新.
-
-        行业标准做法: 类周期呼吸信号用迟滞锁优于递推卡尔曼滤波,
-        避免显示值在真实值±3 BPM范围无意义抖动.
-        """
-        if bpm <= 0:
-            self._breath_locked = False
-            self._breath_lock_count = 0
-            self._breath_lock_bpm = 0.0
-            return bpm
-
-        if self._breath_locked:
-            if abs(bpm - self._breath_lock_bpm) <= 5:
-                self._breath_lock_count = 3
-                return self._breath_lock_bpm
-            else:
-                self._breath_lock_count -= 1
-                if self._breath_lock_count <= 0:
-                    self._breath_locked = False
-                    self._breath_lock_bpm = bpm
-                return bpm
-        else:
-            if self._breath_lock_bpm > 0 and abs(bpm - self._breath_lock_bpm) <= 3:
-                self._breath_lock_count += 1
-                if self._breath_lock_count >= 3:
-                    self._breath_locked = True
-                    self._breath_lock_bpm = bpm
-            else:
-                self._breath_lock_count = 0
-                self._breath_lock_bpm = bpm
-            return bpm
 
     def _check_quality(self, signal: np.ndarray) -> dict:
         from scipy.signal import welch

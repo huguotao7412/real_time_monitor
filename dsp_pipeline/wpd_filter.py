@@ -71,21 +71,21 @@ def wpd_separate(
     fs: float,
     breath_band: tuple[float, float] = (0.1, 0.8),
     heart_band: tuple[float, float] = (1.0, 2.0),
+    heart_input_signal: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Separate breath and heart signals using wavelet packet decomposition.
 
     Args:
-        signal: 1D real-valued cleaned displacement signal.
+        signal: 1D displacement signal (used for breath path).
         fs: Sampling rate in Hz.
         breath_band: Frequency range for breath reconstruction (Hz).
         heart_band: Frequency range for heart reconstruction (Hz).
+        heart_input_signal: Optional separate input for heart path.
+                            If None, uses diff(signal). Use this when heart
+                            needs different preprocessing (e.g. EMD) than breath.
 
     Returns:
         (breath_waveform, heart_waveform): Two 1D arrays same length as input.
-        On WPD failure, returns (signal, zeros).
-
-    Raises:
-        ValueError: If signal length < 16 (too short for WPD).
     """
     n = len(signal)
     if n < 16:
@@ -93,21 +93,24 @@ def wpd_separate(
 
     wpt_level = _compute_wpd_level(n)
 
-    # Breath: db6 wavelet, no diff (MATLAB: sig_enhanced_nodiff = FiltedData(2:end))
+    # Breath: db6 wavelet, no diff, no EMD (MATLAB: sig_enhanced_nodiff = FiltedData(2:end))
     breath_input = signal[1:] if len(signal) > 1 else signal
     try:
         wp_breath = pywt.WaveletPacket(
             breath_input, 'db6', mode='symmetric', maxlevel=wpt_level
         )
         breath_wave = _reconstruct_band(wp_breath, wpt_level, fs, breath_band)
-        # Pad to match input length (MATLAB: rec_breath = zeros(size(sig_enhanced)))
         if len(breath_wave) < n:
             breath_wave = np.pad(breath_wave, (0, n - len(breath_wave)))
     except Exception:
         breath_wave = signal.copy()
 
-    # Heart: sym8 wavelet, on diff(signal) (MATLAB: sig_heart_pre = diff(FiltedData))
-    heart_input = np.diff(signal, prepend=signal[0])
+    # Heart: sym8 wavelet, on diff(input) (MATLAB: sig_heart_pre = diff(FiltedData))
+    if heart_input_signal is None:
+        heart_input = np.diff(signal, prepend=signal[0])
+    else:
+        heart_input = np.diff(heart_input_signal, prepend=heart_input_signal[0])
+
     try:
         wp_heart = pywt.WaveletPacket(
             heart_input, 'sym8', mode='symmetric', maxlevel=wpt_level
