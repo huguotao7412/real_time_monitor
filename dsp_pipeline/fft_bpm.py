@@ -206,6 +206,95 @@ def fft_peak_to_bpm(signal, fs=20.0, valid_band=(0.1, 3.0)):
     return bpm
 
 
+# === 自相关 BPM 估计 (行业标准: 对类周期呼吸波形远优于 FFT) ===
+
+def estimate_bpm_autocorr(
+    signal: np.ndarray,
+    fs: float,
+    valid_band: tuple[float, float],
+) -> tuple[float, float]:
+    """Estimate BPM via unbiased autocorrelation period detection.
+
+    Directly measures the dominant period by finding the first significant
+    ACF peak. Far more robust than FFT for quasi-periodic, non-sinusoidal
+    breathing waveforms — insensitive to harmonic energy distribution.
+
+    Args:
+        signal: 1D real-valued waveform.
+        fs: Sampling rate in Hz.
+        valid_band: (lo, hi) frequency range in Hz.
+
+    Returns:
+        (bpm, confidence) where confidence ∈ [0, 1].
+    """
+    n = len(signal)
+    if n < fs * 2:
+        return 0.0, 0.0
+
+    t = np.arange(n)
+    detrended = signal - np.polyval(np.polyfit(t, signal, 1), t)
+
+    # Unbiased autocorrelation
+    acf = np.correlate(detrended, detrended, mode='full')
+    acf = acf[n - 1:]
+    acf = acf / (acf[0] + 1e-10)
+
+    lo_hz, hi_hz = valid_band
+    min_lag = max(1, int(fs / hi_hz))
+    max_lag = min(n - 1, int(fs / lo_hz))
+
+    if min_lag >= max_lag or max_lag >= len(acf):
+        return 0.0, 0.0
+
+    acf_roi = acf[min_lag:max_lag + 1]
+
+    from scipy.signal import find_peaks
+    peaks, props = find_peaks(acf_roi, height=0.15, distance=max(1, min_lag // 2))
+
+    if len(peaks) == 0:
+        best_offset = np.argmax(acf_roi)
+        best_lag = min_lag + best_offset
+        confidence = max(0.0, float(acf[best_lag]))
+    else:
+        best_rel = peaks[np.argmax(props['peak_heights'])]
+        best_lag = min_lag + best_rel
+        confidence = min(1.0, float(props['peak_heights'][np.argmax(props['peak_heights'])]))
+
+    period_sec = best_lag / fs
+    bpm = 60.0 / period_sec
+
+    if bpm < lo_hz * 60 or bpm > hi_hz * 60:
+        return 0.0, 0.0
+
+    return bpm, confidence
+
+
+def _consensus_breath_bpm(breath_signal: np.ndarray, fs: float) -> float:
+    """Multi-method consensus breath BPM: autocorr + FFT + time-domain.
+
+    Each method contributes one vote. The median is robust to single-method
+    outliers (e.g. FFT locking onto a harmonic while autocorr stays on track).
+    """
+    estimates: list[float] = []
+
+    ac_bpm, ac_conf = estimate_bpm_autocorr(breath_signal, fs, (0.1, 0.8))
+    if ac_bpm > 0 and ac_conf > 0.1:
+        estimates.append(ac_bpm)
+
+    fft_bpm, fft_prom = estimate_bpm(breath_signal, fs, (0.1, 0.8), n_fft=2048)
+    if fft_bpm > 0 and fft_prom > 0.15:
+        estimates.append(fft_bpm)
+
+    td_bpm = estimate_breath_bpm_time_domain(breath_signal, fs)
+    if td_bpm > 0:
+        estimates.append(td_bpm)
+
+    if not estimates:
+        return 0.0
+
+    return float(np.median(estimates))
+
+
 # === STFT + Kalman hybrid BPM estimation (MATLAB PhaseProcess port) ===
 
 def estimate_bpm_stft(
@@ -237,19 +326,10 @@ def estimate_bpm_stft(
     if n < 64:
         return 0.0, 0.0
 
-    # --- Breath STFT ---
-    breath_win = max(64, int(n * 0.9))
-    breath_overlap = int(breath_win * 0.9)
-    nfft_b = max(n_fft, 2 ** int(np.ceil(np.log2(breath_win))))
-
-    breath_dt = _detrend_cubic(breath_signal)
-    f_b, t_b, Zxx_b = stft(
-        breath_dt, fs, window='boxcar', nperseg=breath_win,
-        noverlap=breath_overlap, nfft=nfft_b,
-    )
-    mag_b = np.abs(Zxx_b)
-
-    breath_bpm = _extract_bpm_from_stft(f_b, mag_b, (0.1, 0.8), 'breath')
+    # --- Breath: 三法共识 (自相关 + FFT + 时域) ---
+    # 替换原 STFT 脊线法: 200点窗口仅产生~2个STFT时间列,
+    # 频率分辨率不足导致帧间剧烈跳动。自相关直接测周期,天然抗谐波。
+    breath_bpm = _consensus_breath_bpm(breath_signal, fs)
 
     # --- Heart STFT ---
     heart_win = max(64, int(n * 0.6))
