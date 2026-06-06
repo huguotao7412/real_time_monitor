@@ -365,7 +365,7 @@ class Pipeline:
 
                     # 优化后: 中值去毛刺 → 放宽限幅 → 高响应Kalman
                     _dt = BPM_UPDATE_INTERVAL / FS_HZ
-                    _max_breath_delta = 10.0 * _dt
+                    _max_breath_delta = 30.0 * _dt
                     _max_heart_delta = 25.0 * _dt
 
                     if breath_bpm > 0:
@@ -410,7 +410,7 @@ class Pipeline:
 
             if not self._use_advanced_dsp or breath_bpm <= 0:
                 _dt = BPM_UPDATE_INTERVAL / FS_HZ
-                _max_breath_delta = 10.0 * _dt
+                _max_breath_delta = 30.0 * _dt
                 _max_heart_delta = 25.0 * _dt
 
                 breath_bpm = estimate_breath_bpm_time_domain(

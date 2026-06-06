@@ -46,13 +46,13 @@ def estimate_bpm(
     peak_idx = np.argmax(band_spectrum)
     peak_freq = band_freqs[peak_idx]
 
-    # 半频检测: 若半频处能量 > 主峰 35%, 主峰实为二次谐波, 重新锁定到半频
+    # 半频检测: 若半频处能量 > 主峰 50%, 主峰实为二次谐波, 重新锁定到半频
     half_freq = peak_freq / 2.0
     if half_freq >= valid_band[0]:
-        half_mask = (band_freqs >= half_freq * 0.8) & (band_freqs <= half_freq * 1.2)
+        half_mask = (band_freqs >= half_freq * 0.85) & (band_freqs <= half_freq * 1.15)
         if np.any(half_mask):
             sub_peak_idx = np.argmax(band_spectrum * half_mask)
-            if band_spectrum[sub_peak_idx] > band_spectrum[peak_idx] * 0.35:
+            if band_spectrum[sub_peak_idx] > band_spectrum[peak_idx] * 0.5:
                 peak_idx = sub_peak_idx
                 peak_freq = band_freqs[peak_idx]
 
@@ -298,6 +298,15 @@ def _extract_bpm_from_stft(
     # Ridge extraction: max magnitude per time column
     max_indices = np.argmax(mag_roi, axis=0)
     trace_hz = f_roi[max_indices]
+
+    # 呼吸: 每列半频检测, 防二次谐波锁定 (30 BPM 谐波锁替 15 BPM 基频)
+    if signal_type == 'breath':
+        for t in range(len(trace_hz)):
+            hf = trace_hz[t] / 2.0
+            if hf >= f_lo:
+                half_idx = np.argmin(np.abs(f_roi - hf))
+                if mag_roi[half_idx, t] > mag_roi[max_indices[t], t] * 0.4:
+                    trace_hz[t] = f_roi[half_idx]
 
     # Kalman filter the trace
     if signal_type == 'breath':
