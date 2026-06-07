@@ -6,9 +6,32 @@ import queue
 from collections import deque
 import numpy as np
 
+# Safe import of scipy.signal functions with lightweight fallbacks if SciPy is not available
+try:
+    from scipy.signal import sosfiltfilt, savgol_filter
+except Exception:
+    # Fallbacks: keep pipeline running even if SciPy isn't installed
+    def _sosfiltfilt_passthrough(sos, x):
+        return x
+    sosfiltfilt = _sosfiltfilt_passthrough
+
+    def savgol_filter(x, window_length=9, polyorder=3, deriv=0):
+        import numpy as _np
+        # Basic moving-average fallback for smoothing, gradient for derivative
+        if window_length < 3:
+            window_length = 3
+        if deriv == 0:
+            w = _np.ones(window_length) / float(window_length)
+            return _np.convolve(x, w, mode='same')
+        else:
+            sm = _np.convolve(x, _np.ones(window_length) / float(window_length), mode='same')
+            return _np.gradient(sm)
+
 from config.protocol import (
     RAW_QUEUE_MAXSIZE, DISPLAY_QUEUE_MAXSIZE,
     WINDOW_SIZE, FS_HZ, BPM_UPDATE_INTERVAL,
+    BREATH_RAW_HISTORY_MAXLEN, BREATH_HISTORY_MAXLEN,
+    BREATH_USE_NEW_SMOOTHER, HEART_USE_NEW_SMOOTHER,
 )
 from models.radar_frame import RadarFrame
 from dsp_pipeline.vital_signs import VitalSigns
@@ -19,9 +42,7 @@ from dsp_pipeline.filters import remove_dc, VitalSignFilter
 from dsp_pipeline.fft_bpm import estimate_bpm, kalman_smooth, estimate_breath_bpm_time_domain, estimate_bpm_stft
 from dsp_pipeline.music_angle import estimate_angle_music
 from dsp_pipeline.lcmv_beamformer import lcmv_displacement
-
-from dsp_pipeline.wpd_filter import wpd_separate
-from scipy.signal import sosfiltfilt, savgol_filter
+from dsp_pipeline.smoothers import SmootherState, apply_smoothing_chain, compute_sqi
 
 
 class Pipeline:
@@ -67,8 +88,15 @@ class Pipeline:
         # Kalman 追踪历史
         self._breath_history: list[float] = []
         self._heart_history: list[float] = []
-        self._breath_raw_history: deque[float] = deque(maxlen=3)  # 中值预滤波
+        # raw history deque for median prefilter; size moved to config default
+        from config.protocol import BREATH_RAW_HISTORY_MAXLEN, BREATH_HISTORY_MAXLEN
+        self._breath_raw_history: deque[float] = deque(maxlen=BREATH_RAW_HISTORY_MAXLEN)  # 中值预滤波
         self._heart_raw_history: deque[float] = deque(maxlen=3)
+
+        # Smoother state for breath
+        self._breath_smoother = SmootherState()
+        # Optional smoother for heart (off by default)
+        self._heart_smoother = SmootherState()
 
         # 弱信号计数 (用于 Range Bin 重捕获)
         self._low_signal_frame_count: int = 0
@@ -315,10 +343,13 @@ class Pipeline:
         breath_wave = breath_wave[1:]  # MATLAB: sig_enhanced_nodiff = FiltedData(2:end)
 
         # Heart: diff → WPD sym8 (MATLAB: sig_heart_pre = diff(FiltedData); wpdec(sig_heart_pre))
+        from dsp_pipeline.emd_cleaner import emd_harmonic_clean
         try:
-            heart_diff = np.diff(filted)
+            # 清除 displacement 中的呼吸谐波后再提取心率
+            clean_disp = emd_harmonic_clean(filted, FS_HZ, max_imf=4)
+            heart_diff = np.diff(clean_disp)
             _, heart_wave = wpd_separate(
-                filted, FS_HZ, heart_input_signal=heart_diff
+                clean_disp, FS_HZ, heart_input_signal=heart_diff
             )
         except Exception:
             enhanced = savgol_filter(filted, window_length=9, polyorder=3, deriv=1)
@@ -332,13 +363,13 @@ class Pipeline:
         except Exception:
             breath_bpm, _ = estimate_bpm(
                 breath_wave, FS_HZ, (0.1, 0.8), n_fft=4096,
-                enable_subharmonic_rescue=False,
+                enable_subharmonic_rescue=True,
             )
             if breath_bpm <= 0:
                 breath_bpm = estimate_breath_bpm_time_domain(breath_wave, FS_HZ)
             f0 = breath_bpm / 60.0 if breath_bpm > 0 else 0.0
             heart_bpm, _ = estimate_bpm(
-                heart_wave, FS_HZ, (1.0, 2.5), f0=f0
+                heart_wave, FS_HZ, (0.8, 2.5), f0=f0
             )
 
         return breath_wave, heart_wave, breath_bpm, heart_bpm
@@ -400,22 +431,31 @@ class Pipeline:
 
                     # 中值去飞点 → Kalman 平滑 → EMA 稳显示
                     if breath_bpm > 0:
+                        # Use combined smoother: median -> kalman -> jump-filter -> adaptive EMA
                         self._breath_raw_history.append(breath_bpm)
-                        breath_bpm = float(np.median(list(self._breath_raw_history)))
-                        self._breath_history.append(breath_bpm)
-                        if len(self._breath_history) > 12:
-                            self._breath_history = self._breath_history[-12:]
-                        breath_bpm = kalman_smooth(self._breath_history, q=1e-2, r=0.1)
+                        # compute short-term breath power ratio and phase_range for SQI
+                        sqi_val = compute_sqi(recent_phase_range, breath_power_ratio, self._current_bin_snr)
+                        breath_bpm = apply_smoothing_chain(self._breath_smoother, breath_bpm,
+                                                           recent_phase_range, breath_power_ratio,
+                                                           self._current_bin_snr)
                         self._last_valid_breath_bpm = breath_bpm
 
                     if heart_bpm > 0:
-                        self._heart_raw_history.append(heart_bpm)
-                        heart_bpm = float(np.median(list(self._heart_raw_history)))
-                        self._heart_history.append(heart_bpm)
-                        if len(self._heart_history) > 10:
-                            self._heart_history = self._heart_history[-10:]
-                        heart_bpm = kalman_smooth(self._heart_history, q=1e-3, r=0.5)
-                        self._last_valid_heart_bpm = heart_bpm
+                        # Heart smoothing: either old median->kalman or new smoother
+                        if HEART_USE_NEW_SMOOTHER:
+                            self._heart_raw_history.append(heart_bpm)
+                            heart_bpm = apply_smoothing_chain(self._heart_smoother, heart_bpm,
+                                                              recent_phase_range, breath_power_ratio,
+                                                              self._current_bin_snr)
+                            self._last_valid_heart_bpm = heart_bpm
+                        else:
+                            self._heart_raw_history.append(heart_bpm)
+                            heart_bpm = float(np.median(list(self._heart_raw_history)))
+                            self._heart_history.append(heart_bpm)
+                            if len(self._heart_history) > 10:
+                                self._heart_history = self._heart_history[-10:]
+                            heart_bpm = kalman_smooth(self._heart_history, q=1e-3, r=0.5)
+                            self._last_valid_heart_bpm = heart_bpm
                     self._cached_breath_wave = adv_breath
                     self._cached_heart_wave = adv_heart
                 except Exception:
@@ -428,15 +468,14 @@ class Pipeline:
                 if breath_bpm <= 0:
                     breath_bpm, _ = estimate_bpm(
                         breath_signal, FS_HZ, (0.1, 0.8), n_fft=1024,
-                        enable_subharmonic_rescue=False,
+                        enable_subharmonic_rescue=True,
                     )
                 if breath_bpm > 0:
                     self._breath_raw_history.append(breath_bpm)
-                    breath_bpm = float(np.median(list(self._breath_raw_history)))
-                    self._breath_history.append(breath_bpm)
-                    if len(self._breath_history) > 12:
-                        self._breath_history = self._breath_history[-12:]
-                    breath_bpm = kalman_smooth(self._breath_history, q=1e-2, r=0.1)
+                    sqi_val = compute_sqi(recent_phase_range, breath_power_ratio, self._current_bin_snr)
+                    breath_bpm = apply_smoothing_chain(self._breath_smoother, breath_bpm,
+                                                       recent_phase_range, breath_power_ratio,
+                                                       self._current_bin_snr)
                     self._last_valid_breath_bpm = breath_bpm
 
                 f0 = breath_bpm / 60.0 if breath_bpm > 0 else 0.0
@@ -444,13 +483,20 @@ class Pipeline:
                     heart_signal, FS_HZ, (1.0, 2.5), f0=f0
                 )
                 if heart_bpm_raw > 0:
-                    self._heart_raw_history.append(heart_bpm_raw)
-                    heart_bpm = float(np.median(list(self._heart_raw_history)))
-                    self._heart_history.append(heart_bpm)
-                    if len(self._heart_history) > 10:
-                        self._heart_history = self._heart_history[-10:]
-                    heart_bpm = kalman_smooth(self._heart_history, q=1e-3, r=0.5)
-                    self._last_valid_heart_bpm = heart_bpm
+                    if HEART_USE_NEW_SMOOTHER:
+                        self._heart_raw_history.append(heart_bpm_raw)
+                        heart_bpm = apply_smoothing_chain(self._heart_smoother, heart_bpm_raw,
+                                                          recent_phase_range, breath_power_ratio,
+                                                          self._current_bin_snr)
+                        self._last_valid_heart_bpm = heart_bpm
+                    else:
+                        self._heart_raw_history.append(heart_bpm_raw)
+                        heart_bpm = float(np.median(list(self._heart_raw_history)))
+                        self._heart_history.append(heart_bpm)
+                        if len(self._heart_history) > 10:
+                            self._heart_history = self._heart_history[-10:]
+                        heart_bpm = kalman_smooth(self._heart_history, q=1e-3, r=0.5)
+                        self._last_valid_heart_bpm = heart_bpm
 
             self._last_bpm_update = self._frame_count
 

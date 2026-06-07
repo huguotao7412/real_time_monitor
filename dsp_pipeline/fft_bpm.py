@@ -238,7 +238,7 @@ def estimate_bpm_stft(
 
     # --- Breath: 放弃自相关，直接使用改进后的高精度抗谐波 FFT ---
     breath_bpm, _ = estimate_bpm(breath_signal, fs, (0.1, 0.8), n_fft=4096,
-                                  enable_subharmonic_rescue=False)
+                                 enable_subharmonic_rescue=True)
     if breath_bpm <= 0:
         breath_bpm = estimate_breath_bpm_time_domain(breath_signal, fs)
 
@@ -253,10 +253,11 @@ def estimate_bpm_stft(
     )
     mag_h = np.abs(Zxx_h)
 
-    heart_bpm_stft = _extract_bpm_from_stft(f_h, mag_h, (1.0, 2.0), 'heart')
+    heart_bpm_stft = _extract_bpm_from_stft(f_h, mag_h, (0.8, 2.5), 'heart')
 
     # FFT fallback for heart: upper bound (MATLAB: 1.0-2.5 Hz)
-    heart_fft_bpm, _ = estimate_bpm(heart_signal, fs, (1.0, 2.5))
+    f0 = breath_bpm / 60.0 if breath_bpm > 0 else 0.0
+    heart_fft_bpm, _ = estimate_bpm(heart_signal, fs, (0.8, 2.5), f0=f0)
 
     if heart_bpm_stft > 0 and heart_fft_bpm > 0:
         heart_bpm = min(heart_bpm_stft, heart_fft_bpm)

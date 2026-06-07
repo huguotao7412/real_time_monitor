@@ -37,7 +37,7 @@ class RadarMgr:
             "mmwc open",
             "mmwc stop",
             "mmwc mode 4 1",         # 2T4R, 1DFFT
-            "mmwc frame 10 -6",      # 10ms period (100Hz), infinite
+            "mmwc frame 50 -6",      # 10ms period (100Hz), infinite
             "mmwc uart on",
             "mmwc baudrate 1000000",
             "mmwc report cube -1",   # infinite frames
