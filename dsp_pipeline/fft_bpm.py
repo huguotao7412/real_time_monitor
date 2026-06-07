@@ -171,7 +171,9 @@ def estimate_breath_bpm_time_domain(
     if np.sum(valid) < 1:
         return 0.0
 
-    mean_interval = np.mean(intervals[valid])
+    mean_interval = np.median(intervals[valid])
+    if np.std(intervals[valid]) > 2.0 and len(intervals[valid]) > 2:
+        return 0.0  # 让上层逻辑 Fallback 到 FFT
     bpm = 60.0 / mean_interval
 
     # 最终范围检查
@@ -252,21 +254,26 @@ def estimate_bpm_stft(
                                      enable_subharmonic_rescue=True)
 
     # --- Heart STFT (MATLAB: 25% hamming, 80% overlap) ---
-    heart_win = max(64, int(n * 0.6))
-    heart_overlap = int(heart_win * 0.8)
-    nfft_h = max(n_fft, 2 ** int(np.ceil(np.log2(heart_win))))
+    window_sec = n / fs
+    if window_sec < 15.0:
+            # 短窗口下，强制 STFT 输出失效，依赖下方的高精度 FFT
+            heart_bpm_stft = 0.0
+    else:
+        heart_win = max(64, int(n * 0.6))
+        heart_overlap = int(heart_win * 0.8)
+        nfft_h = max(n_fft, 2 ** int(np.ceil(np.log2(heart_win))))
 
-    f_h, t_h, Zxx_h = stft(
-        heart_signal, fs, window='hamming', nperseg=heart_win,
-        noverlap=heart_overlap, nfft=nfft_h,
-    )
-    mag_h = np.abs(Zxx_h)
+        f_h, t_h, Zxx_h = stft(
+            heart_signal, fs, window='hamming', nperseg=heart_win,
+            noverlap=heart_overlap, nfft=nfft_h,
+        )
+        mag_h = np.abs(Zxx_h)
 
-    heart_bpm_stft = _extract_bpm_from_stft(f_h, mag_h, (0.8, 2.5), 'heart')
+        heart_bpm_stft = _extract_bpm_from_stft(f_h, mag_h, (0.8, 2.5), 'heart')
 
     # FFT fallback for heart: upper bound (MATLAB: 1.0-2.5 Hz)
     f0 = breath_bpm / 60.0 if breath_bpm > 0 else 0.0
-    heart_fft_bpm, _ = estimate_bpm(heart_signal, fs, (0.8, 2.5), f0=f0)
+    heart_fft_bpm, _ = estimate_bpm(heart_signal, fs, (0.8, 2.5), f0=f0,n_fft=4096)
 
     if heart_bpm_stft > 0 and heart_fft_bpm > 0:
         heart_bpm = min(heart_bpm_stft, heart_fft_bpm)

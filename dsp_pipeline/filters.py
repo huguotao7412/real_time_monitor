@@ -42,6 +42,7 @@ def remove_dc(signal: np.ndarray, window: int = 200) -> np.ndarray:
     would introduce.
     """
     from scipy.signal import filtfilt
+
     b, a = butter(2, 0.05 / (20.0 / 2), btype='high')
     return filtfilt(b, a, signal)
 

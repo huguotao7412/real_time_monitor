@@ -84,19 +84,24 @@ def apply_smoothing_chain(state: SmootherState, raw_bpm: float, phase_range: flo
     delta = abs(median_raw - state.last_valid)
     threshold = max(BPM_JUMP_THRESHOLD, 0.4 * max(10.0, abs(state.last_valid)))
 
-    if delta > threshold and sqi < 0.5:
-        # treat as artifact: hold last_valid for up to BPM_JUMP_HOLD_COUNT reports
-        if state.jump_hold_count < BPM_JUMP_HOLD_COUNT:
-            state.jump_hold_count += 1
-            out = state.last_valid
-            # keep EMA unchanged
-            return float(out)
+    if delta > threshold:
+        # 如果发生跳变，除非信号质量极高(>0.85)，否则进行保持拦截
+        if sqi < 0.85:
+            if state.jump_hold_count < BPM_JUMP_HOLD_COUNT:
+                state.jump_hold_count += 1
+                # keep EMA unchanged
+                return float(state.last_valid)  # 强制返回上一次有效值
+            else:
+                # 保持超时，强制接受新状态（可能是目标换人）
+                state.jump_hold_count = 0
+                state.last_valid = median_raw
         else:
-            # force accept after hold attempts
+            # SQI > 0.85，强行跟随跳变 (但建议增加跳变速率限制)
             state.jump_hold_count = 0
-            state.last_valid = median_raw
+            # 增加最大斜率限制 (例如每秒最多跳变 15 BPM)
+            sign = 1 if median_raw > state.last_valid else -1
+            state.last_valid = state.last_valid + sign * min(delta, 15.0)
     else:
-        # accept new value
         state.jump_hold_count = 0
         state.last_valid = median_raw
 

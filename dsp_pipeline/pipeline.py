@@ -65,9 +65,9 @@ class Pipeline:
         # 2D-CFAR state (MATLAB adaptive_2d_cfar_findTargetBin)
         self._cfar_accumulator: list[np.ndarray] = []
         self._cfar_state: dict | None = None
-        self._cfar_rolling_buffer: deque[np.ndarray] = deque(maxlen=50)
-        self._cfar_initial_frames: int = 50
-        self._cfar_rescan_interval: int = 100  # ~5s at 20 Hz
+        self._cfar_rolling_buffer: deque[np.ndarray] = deque(maxlen=int(FS_HZ * 2.5))
+        self._cfar_initial_frames: int = int(FS_HZ * 2.5)
+        self._cfar_rescan_interval: int = int(FS_HZ * 5.0)
         self._current_bin_snr: float = 0.0
         self.DISTANCE_PER_BIN: float = 0.05  # RS6240 range resolution
 
@@ -80,7 +80,7 @@ class Pipeline:
         self._angle_initialized: bool = False
         self._beamforming_ok: bool = True  # set False on failure -> fallback
         self._last_music_update: int = -50
-        self._music_update_interval: int = 50  # MATLAB: per-frame MUSIC; we do every ~50
+        self._music_update_interval: int = int(FS_HZ * 2.5)
 
         # MATLAB Filter.m: SOS 滤波器组
         self._filter = VitalSignFilter(fs=FS_HZ)
@@ -389,16 +389,16 @@ class Pipeline:
         heart_signal = self._filter.filter_heart(enhanced)
 
         # 信号能量指标
-        phase_range = float(np.max(enhanced) - np.min(enhanced))
+        phase_range = float(np.max(no_dc) - np.min(no_dc))
         breath_energy = float(np.var(breath_signal))
         total_energy = float(np.var(enhanced)) + 1e-10
         breath_power_ratio = breath_energy / total_energy
 
         # 提取最近 30 帧 (1.5秒) 短时能量，避免 10 秒窗口导致的响应迟钝
-        recent_frames = 30
-        if len(enhanced) >= recent_frames:
-            recent_enhanced = enhanced[-recent_frames:]
-            recent_phase_range = float(np.max(recent_enhanced) - np.min(recent_enhanced))
+        recent_frames = int(FS_HZ * 1.5)
+        if len(no_dc) >= recent_frames:
+            recent_no_dc = no_dc[-recent_frames:]
+            recent_phase_range = float(np.max(recent_no_dc) - np.min(recent_no_dc))
         else:
             recent_phase_range = phase_range
 
@@ -410,7 +410,7 @@ class Pipeline:
         else:
             self._low_signal_frame_count = 0
 
-        if self._low_signal_frame_count >= 30 and self._best_bin is not None:
+        if self._low_signal_frame_count >= int(FS_HZ * 1.5) and self._best_bin is not None:
             self._best_bin = None
 
         # BPM 估计

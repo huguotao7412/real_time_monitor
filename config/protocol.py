@@ -33,18 +33,18 @@ FFT_BIN_DTYPE = "<i2"  # little-endian int16 per component
 PACKET_HEADER_MIN_SIZE = 7  # Magic(4) + MsgId(1) + PacketLen(2) minimum guess
 
 # === DSP 参数 ===
-FS_HZ = 20                 # 假设帧率 20 Hz，实际从帧头读取
-WINDOW_DURATION_SEC = 10   # 滑动窗口 10 秒
-WINDOW_SIZE = FS_HZ * WINDOW_DURATION_SEC  # 200 帧
-BPM_UPDATE_INTERVAL = 5    # 每 5 帧更新一次 BPM
+FS_HZ = 20                # 假设帧率 20 Hz，实际从帧头读取
+WINDOW_DURATION_SEC = 15.0   # 滑动窗口 10 秒
+WINDOW_SIZE = int(FS_HZ * WINDOW_DURATION_SEC) # 200 帧
+BPM_UPDATE_INTERVAL = int(FS_HZ * 0.25)   # 每 5 帧更新一次 BPM
 
 # === 滤波器频段 ===
 BREATH_BAND = (0.1, 0.6)   # 呼吸: 6-36 次/分钟
 HEART_BAND = (0.8, 2.5)    # 心率: 48-150 次/分钟
 
 # === Queue 容量 ===
-RAW_QUEUE_MAXSIZE = 256
-DISPLAY_QUEUE_MAXSIZE = 16
+RAW_QUEUE_MAXSIZE = 1024
+DISPLAY_QUEUE_MAXSIZE = 64
 
 # === UI 参数 ===
 UI_REFRESH_MS = 33  # ~30 fps
