@@ -344,6 +344,7 @@ class Pipeline:
 
         # Heart: diff → WPD sym8 (MATLAB: sig_heart_pre = diff(FiltedData); wpdec(sig_heart_pre))
         from dsp_pipeline.emd_cleaner import emd_harmonic_clean
+        from dsp_pipeline.wpd_filter import wpd_separate
         try:
             # 清除 displacement 中的呼吸谐波后再提取心率
             clean_disp = emd_harmonic_clean(filted, FS_HZ, max_imf=4)
@@ -352,6 +353,7 @@ class Pipeline:
                 clean_disp, FS_HZ, heart_input_signal=heart_diff
             )
         except Exception:
+            print(f"[Advanced DSP] WPD Fallback triggered: {e}")
             enhanced = savgol_filter(filted, window_length=9, polyorder=3, deriv=1)
             heart_wave = self._filter.filter_heart(enhanced)
 
@@ -369,7 +371,7 @@ class Pipeline:
                 breath_bpm = estimate_breath_bpm_time_domain(breath_wave, FS_HZ)
             f0 = breath_bpm / 60.0 if breath_bpm > 0 else 0.0
             heart_bpm, _ = estimate_bpm(
-                heart_wave, FS_HZ, (0.8, 2.5), f0=f0
+                heart_wave, FS_HZ, (0.8, 2.0), f0=f0
             )
 
         return breath_wave, heart_wave, breath_bpm, heart_bpm
@@ -480,7 +482,7 @@ class Pipeline:
 
                 f0 = breath_bpm / 60.0 if breath_bpm > 0 else 0.0
                 heart_bpm_raw, prominence = estimate_bpm(
-                    heart_signal, FS_HZ, (1.0, 2.5), f0=f0
+                    heart_signal, FS_HZ, (0.8, 2.0), f0=f0
                 )
                 if heart_bpm_raw > 0:
                     if HEART_USE_NEW_SMOOTHER:

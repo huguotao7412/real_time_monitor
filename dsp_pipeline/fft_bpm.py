@@ -51,6 +51,10 @@ def estimate_bpm(
     band_spectrum = spectrum[mask]
     band_freqs = freqs[mask]
 
+    if valid_band[1] > 1.0:
+        safe_freqs = np.where(band_freqs == 0, 1e-5, band_freqs)
+        band_spectrum = band_spectrum / safe_freqs
+
     max_val = float(np.max(band_spectrum))
 
     if not enable_subharmonic_rescue:
@@ -269,7 +273,9 @@ def estimate_bpm_stft(
         )
         mag_h = np.abs(Zxx_h)
 
-        heart_bpm_stft = _extract_bpm_from_stft(f_h, mag_h, (0.8, 2.5), 'heart')
+        f0 = breath_bpm / 60.0 if breath_bpm > 0 else 0.0
+
+        heart_bpm_stft = _extract_bpm_from_stft(f_h, mag_h, (0.8, 2.5), 'heart',f0=f0)
 
     # FFT fallback for heart: upper bound (MATLAB: 1.0-2.5 Hz)
     f0 = breath_bpm / 60.0 if breath_bpm > 0 else 0.0
@@ -290,6 +296,7 @@ def _extract_bpm_from_stft(
     magnitude: np.ndarray,
     freq_band: tuple[float, float],
     signal_type: str = 'breath',
+    f0: float = 0.0,
 ) -> float:
     """Extract BPM from STFT magnitude via ridge extraction + Kalman filter.
 
@@ -312,6 +319,14 @@ def _extract_bpm_from_stft(
 
     f_roi = frequencies[mask]
     mag_roi = magnitude[mask, :]
+
+    if signal_type == 'heart' and f0 > 0.1:
+        for h in range(2, 6):  # 遍历 2 到 5 次呼吸谐波
+            harmonic_freq = f0 * h
+            if freq_band[0] <= harmonic_freq <= freq_band[1]:
+                # 将谐波附近 ±15% 的能量衰减到 10%
+                harm_mask = (f_roi >= harmonic_freq * 0.85) & (f_roi <= harmonic_freq * 1.15)
+                mag_roi[harm_mask, :] *= 0.1
 
     if mag_roi.shape[1] < 2:
         return 0.0

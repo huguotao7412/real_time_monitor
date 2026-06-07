@@ -82,7 +82,7 @@ def apply_smoothing_chain(state: SmootherState, raw_bpm: float, phase_range: flo
         return float(median_raw)
 
     delta = abs(median_raw - state.last_valid)
-    threshold = max(BPM_JUMP_THRESHOLD, 0.4 * max(10.0, abs(state.last_valid)))
+    threshold = max(BPM_JUMP_THRESHOLD, 0.15 * max(10.0, abs(state.last_valid)))
 
     if delta > threshold:
         # 如果发生跳变，除非信号质量极高(>0.85)，否则进行保持拦截
