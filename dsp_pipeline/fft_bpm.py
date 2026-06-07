@@ -10,11 +10,13 @@ def estimate_bpm(
     valid_band: tuple[float, float],
     n_fft: int = 4096,
     f0: float = 0.0,
+    enable_subharmonic_rescue: bool = True,
 ) -> tuple[float, float]:
     """FFT 峰值估计, 返回 (bpm, prominence_norm)
 
     Args:
         f0: 呼吸基频 (Hz), >0 时启用谐波软衰减
+        enable_subharmonic_rescue: 启用基频拯救 (对心跳有用, 呼吸建议关闭)
     """
     n = len(signal)
     if n < 16:
@@ -43,38 +45,49 @@ def estimate_bpm(
     band_spectrum = spectrum[mask]
     band_freqs = freqs[mask]
 
-    peak_idx = np.argmax(band_spectrum)
-    peak_freq = band_freqs[peak_idx]
+    max_val = float(np.max(band_spectrum))
 
-    # 半频检测: 结合局部峰值(Local Peak)特性的智能谐波抑制
-    half_freq = peak_freq / 2.0
-    if half_freq >= valid_band[0]:
-        # 扩大搜索范围以确保捕捉到完整的波峰
-        half_mask = (band_freqs >= half_freq * 0.8) & (band_freqs <= half_freq * 1.2)
-        if np.any(half_mask):
-            sub_peak_idx = np.argmax(band_spectrum * half_mask)
+    if not enable_subharmonic_rescue:
+        # 呼吸最简链路: 直接 argmax, 不做谐波拯救 (避免体动噪声区误触发)
+        peak_idx = np.argmax(band_spectrum)
+        peak_freq = band_freqs[peak_idx]
+    else:
+        from scipy.signal import find_peaks
 
-            # 判断该位置是否为真实的局部峰值，而非 1/f 噪声的下坡斜坡
-            is_local_peak = True
-            if sub_peak_idx > 0 and band_spectrum[sub_peak_idx] <= band_spectrum[sub_peak_idx - 1]:
-                is_local_peak = False
-            if sub_peak_idx < len(band_spectrum) - 1 and band_spectrum[sub_peak_idx] <= band_spectrum[sub_peak_idx + 1]:
-                is_local_peak = False
+        # 1. 寻找所有能量大于全局最大值 20% 的显著峰
+        peaks, _ = find_peaks(band_spectrum, height=max_val * 0.20)
 
-            ratio = band_spectrum[sub_peak_idx] / (band_spectrum[peak_idx] + 1e-10)
+        if len(peaks) == 0:
+            peak_idx = np.argmax(band_spectrum)
+            peak_freq = band_freqs[peak_idx]
+        else:
+            peak_freqs = band_freqs[peaks]
+            peak_heights = band_spectrum[peaks]
 
-            # 策略：如果是真实的凸起波峰，能量>15%即被认定为基频（解决15被识别为30）
-            # 如果只是斜坡，则需要极其庞大的能量(>50%)才妥协（防止30掉到15）
-            if (is_local_peak and ratio > 0.15) or ratio > 0.5:
-                peak_idx = sub_peak_idx
-                peak_freq = band_freqs[peak_idx]
+            # 2. 找到全局能量最大的峰（这可能是真基频，也可能是强二次谐波）
+            max_idx = np.argmax(peak_heights)
+            f_max = peak_freqs[max_idx]
+            peak_idx = peaks[max_idx]
+
+            # 3. 基频拯救机制 (Sub-Harmonic Rescue)
+            best_f = f_max
+            for f_cand in np.sort(peak_freqs):
+                if f_cand >= f_max * 0.85:
+                    break
+
+                ratio = f_max / f_cand
+                if abs(ratio - round(ratio)) < 0.15:
+                    best_f = f_cand
+                    peak_idx = peaks[np.where(peak_freqs == f_cand)[0][0]]
+                    break
+
+            peak_freq = best_f
 
     # 计算 peak prominence (抑制平坦频谱的零显著性警告)
     from scipy.signal import peak_prominences
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", "some peaks have a prominence of 0")
         prom_raw = peak_prominences(band_spectrum, [peak_idx])[0][0]
-    max_val = float(np.max(band_spectrum))
     if max_val > 0:
         prominence_norm = max(0.1, min(1.0, prom_raw / max_val))
     else:
@@ -206,71 +219,6 @@ def fft_peak_to_bpm(signal, fs=20.0, valid_band=(0.1, 3.0)):
     return bpm
 
 
-# === 无偏自相关呼吸 BPM (行业标准: 整个窗口算一个周期, 无 STFT 列数限制) ===
-
-def estimate_bpm_autocorr(
-    signal: np.ndarray,
-    fs: float,
-    valid_band: tuple[float, float],
-) -> float:
-    """Unbiased autocorrelation period detection for breath rate.
-
-    Uses ALL data points for one robust period estimate — no STFT column-count
-    problem. Unbiased normalization compensates the triangular window that
-    otherwise attenuates longer lags (slower breathing).
-    """
-    n = len(signal)
-    if n < fs * 2:
-        return 0.0
-
-    t = np.arange(n)
-    detrended = signal - np.polyval(np.polyfit(t, signal, 1), t)
-
-    acf = np.correlate(detrended, detrended, mode='full')
-    acf = acf[n - 1:]
-
-    # Unbiased: compensate triangular window (acf[lag] *= n/(n-lag))
-    for lag in range(len(acf)):
-        denom = n - lag
-        if denom > 0:
-            acf[lag] /= denom
-    acf = acf / (acf[0] + 1e-10)
-
-    lo_hz, hi_hz = valid_band
-    min_lag = max(1, int(fs / hi_hz))
-    max_lag = min(n - 1, int(fs / lo_hz))
-
-    if min_lag >= max_lag:
-        return 0.0
-
-    acf_roi = acf[min_lag:max_lag + 1]
-
-    from scipy.signal import find_peaks
-    peaks, _ = find_peaks(acf_roi, height=0.2, distance=max(1, min_lag // 2))
-
-    if len(peaks) == 0:
-        best_offset = np.argmax(acf_roi)
-        best_lag = float(min_lag + best_offset)
-    else:
-        best_lag = float(min_lag + peaks[0])  # first significant peak
-
-    # Parabolic interpolation: sub-sample period accuracy
-    best_lag_int = int(best_lag)
-    if 0 < best_lag_int < len(acf) - 1:
-        y0, y1, y2 = acf[best_lag_int - 1], acf[best_lag_int], acf[best_lag_int + 1]
-        denom = 2.0 * (2.0 * y1 - y0 - y2)
-        if abs(denom) > 1e-10:
-            best_lag += (y0 - y2) / denom
-
-    period_sec = best_lag / fs
-    bpm = 60.0 / period_sec
-
-    if bpm < lo_hz * 60 or bpm > hi_hz * 60:
-        return 0.0
-
-    return bpm
-
-
 # === STFT + Kalman hybrid BPM estimation (MATLAB PhaseProcess port) ===
 
 def estimate_bpm_stft(
@@ -288,12 +236,11 @@ def estimate_bpm_stft(
     if n < 64:
         return 0.0, 0.0
 
-    # --- Breath: 无偏自相关 → FFT 频谱寻峰 → 时域峰值 (三级降级) ---
-    breath_bpm = estimate_bpm_autocorr(breath_signal, fs, (0.1, 0.8))
+    # --- Breath: 放弃自相关，直接使用改进后的高精度抗谐波 FFT ---
+    breath_bpm, _ = estimate_bpm(breath_signal, fs, (0.1, 0.8), n_fft=4096,
+                                  enable_subharmonic_rescue=False)
     if breath_bpm <= 0:
-        breath_bpm, _ = estimate_bpm(breath_signal, fs, (0.1, 0.8), n_fft=2048)
-        if breath_bpm <= 0:
-            breath_bpm = estimate_breath_bpm_time_domain(breath_signal, fs)
+        breath_bpm = estimate_breath_bpm_time_domain(breath_signal, fs)
 
     # --- Heart STFT (MATLAB: 25% hamming, 80% overlap) ---
     heart_win = max(64, int(n * 0.6))
@@ -356,7 +303,8 @@ def _extract_bpm_from_stft(
     max_indices = np.argmax(mag_roi, axis=0)
     trace_hz = f_roi[max_indices]
 
-    # 呼吸: 每列智能半频检测，防二次谐波锁定及低频噪声误捕获
+    # 呼吸: 每列智能半频检测，使用 find_peaks 识别真实局部峰值
+    # 解决二次谐波能量强于基频的经典问题
     if signal_type == 'breath':
         for t in range(len(trace_hz)):
             pf = trace_hz[t]
@@ -364,24 +312,18 @@ def _extract_bpm_from_stft(
             hf = pf / 2.0
 
             if hf >= f_lo:
-                # 在半频附近寻找局部极值
                 mask = (f_roi >= hf * 0.8) & (f_roi <= hf * 1.2)
                 if np.any(mask):
                     indices = np.where(mask)[0]
-                    col_data = mag_roi[:, t]
-                    best_idx = indices[np.argmax(col_data[indices])]
-
-                    # 验证局部峰值特征
-                    is_local_peak = True
-                    if best_idx > 0 and col_data[best_idx] <= col_data[best_idx - 1]:
-                        is_local_peak = False
-                    if best_idx < len(col_data) - 1 and col_data[best_idx] <= col_data[best_idx + 1]:
-                        is_local_peak = False
-
-                    ratio = col_data[best_idx] / (p_mag + 1e-10)
-
-                    if (is_local_peak and ratio > 0.15) or ratio > 0.5:
-                        trace_hz[t] = f_roi[best_idx]
+                    half_col = mag_roi[indices, t]
+                    from scipy.signal import find_peaks
+                    half_peaks, _ = find_peaks(half_col)
+                    if len(half_peaks) > 0:
+                        best_rel = half_peaks[np.argmax(half_col[half_peaks])]
+                        best_idx = indices[best_rel]
+                        ratio = mag_roi[best_idx, t] / (p_mag + 1e-10)
+                        if ratio > 0.2 and f_roi[best_idx] >= f_lo:
+                            trace_hz[t] = f_roi[best_idx]
 
     # Kalman filter the trace
     if signal_type == 'breath':

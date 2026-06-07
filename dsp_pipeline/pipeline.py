@@ -19,7 +19,7 @@ from dsp_pipeline.filters import remove_dc, VitalSignFilter
 from dsp_pipeline.fft_bpm import estimate_bpm, kalman_smooth, estimate_breath_bpm_time_domain, estimate_bpm_stft
 from dsp_pipeline.music_angle import estimate_angle_music
 from dsp_pipeline.lcmv_beamformer import lcmv_displacement
-from dsp_pipeline.emd_cleaner import emd_harmonic_clean
+
 from dsp_pipeline.wpd_filter import wpd_separate
 from scipy.signal import sosfiltfilt, savgol_filter
 
@@ -58,6 +58,8 @@ class Pipeline:
         self._angle_deg: float = 0.0  # initial guess: boresight
         self._angle_initialized: bool = False
         self._beamforming_ok: bool = True  # set False on failure -> fallback
+        self._last_music_update: int = -50
+        self._music_update_interval: int = 50  # MATLAB: per-frame MUSIC; we do every ~50
 
         # MATLAB Filter.m: SOS 滤波器组
         self._filter = VitalSignFilter(fs=FS_HZ)
@@ -250,22 +252,21 @@ class Pipeline:
         return None, 0.0, current_actual_snr
 
     def _beamforming_path(self, update_angle: bool) -> np.ndarray | None:
-        """Run MUSIC + LCMV on the RX buffer. Returns displacement [200] or None."""
+        """Run MUSIC + LCMV on the RX buffer. Returns displacement or None."""
         try:
-            rx_matrix = np.array(self._rx_buffer)  # [200, rx]
+            rx_matrix = np.array(self._rx_buffer)  # [window, rx]
 
-            # Periodic MUSIC angle update
-            if update_angle and not self._angle_initialized:
+            # Periodic MUSIC angle update (~every 50 frames), MATLAB-style per-frame
+            if self._frame_count - self._last_music_update >= self._music_update_interval:
                 try:
                     angle, _, peak_q = estimate_angle_music(
                         rx_matrix, FS_HZ, self._filter.sos_all,
                         num_signals=1,
                     )
-                    # Only accept angle if MUSIC peak is significant (noise floor ≈ 1.0)
                     if peak_q > 2.5:
                         self._angle_deg = angle
                         self._angle_initialized = True
-                    # else: keep boresight (0°), angle stays uninitialized
+                    self._last_music_update = self._frame_count
                 except Exception:
                     pass
 
@@ -302,30 +303,25 @@ class Pipeline:
     def _advanced_dsp_path(
         self, displacement: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray, float, float]:
-        """SOS → WPD (breath: no EMD, heart: EMD) → BPM. MATLAB PhaseProcess port."""
+        """SOS → WPD (breath: SOS only, heart: diff+WPD) → BPM. MATLAB PhaseProcess port."""
         # SOS pre-filter (MATLAB: filterObj.apply_all_filter)
         try:
             filted = sosfiltfilt(self._filter.sos_all, displacement)
         except Exception:
             filted = displacement.copy()
 
-        # Heart-only EMD: remove breath harmonics from heart band (MATLAB BP pipeline)
-        # Breath skips EMD — its harmonics are the signal, not interference
-        heart_clean = filted
-        try:
-            heart_clean = emd_harmonic_clean(filted, FS_HZ)
-        except Exception:
-            pass
+        # Breath: 跳过 WPD，直接用 SOS 带通 (呼吸能量强，无需小波重建)
+        breath_wave = self._filter.filter_breath(filted)
+        breath_wave = breath_wave[1:]  # MATLAB: sig_enhanced_nodiff = FiltedData(2:end)
 
-        # WPD: breath from raw SOS, heart from EMD-cleaned
+        # Heart: diff → WPD sym8 (MATLAB: sig_heart_pre = diff(FiltedData); wpdec(sig_heart_pre))
         try:
-            breath_wave, heart_wave = wpd_separate(
-                filted, FS_HZ, heart_input_signal=heart_clean
+            heart_diff = np.diff(filted)
+            _, heart_wave = wpd_separate(
+                filted, FS_HZ, heart_input_signal=heart_diff
             )
         except Exception:
-            no_dc = remove_dc(filted)
-            enhanced = savgol_filter(no_dc, window_length=9, polyorder=3, deriv=1)
-            breath_wave = self._filter.filter_breath(no_dc)
+            enhanced = savgol_filter(filted, window_length=9, polyorder=3, deriv=1)
             heart_wave = self._filter.filter_heart(enhanced)
 
         # BPM estimation: FFT breath + STFT heart (MATLAB PhaseProcess port)
@@ -335,7 +331,8 @@ class Pipeline:
             )
         except Exception:
             breath_bpm, _ = estimate_bpm(
-                breath_wave, FS_HZ, (0.1, 0.8), n_fft=4096
+                breath_wave, FS_HZ, (0.1, 0.8), n_fft=4096,
+                enable_subharmonic_rescue=False,
             )
             if breath_bpm <= 0:
                 breath_bpm = estimate_breath_bpm_time_domain(breath_wave, FS_HZ)
@@ -430,7 +427,8 @@ class Pipeline:
                 )
                 if breath_bpm <= 0:
                     breath_bpm, _ = estimate_bpm(
-                        breath_signal, FS_HZ, (0.1, 0.8), n_fft=1024
+                        breath_signal, FS_HZ, (0.1, 0.8), n_fft=1024,
+                        enable_subharmonic_rescue=False,
                     )
                 if breath_bpm > 0:
                     self._breath_raw_history.append(breath_bpm)

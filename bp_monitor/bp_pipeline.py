@@ -23,6 +23,7 @@ Usage:
 import threading
 import time
 import queue
+from collections import deque
 
 import numpy as np
 from scipy.signal import resample_poly
@@ -67,6 +68,12 @@ class BPPipeline:
         self._frame_count = 0
         self._target_bin: int | None = None
         self._cfar_state: dict | None = None   # persistent CFAR state (adaptive beta)
+
+        # Temporal smoothing: sliding windows for SBP/DBP (median → EMA)
+        self._sbp_history: deque[float] = deque(maxlen=10)
+        self._dbp_history: deque[float] = deque(maxlen=10)
+        self._sbp_ema: float | None = None
+        self._dbp_ema: float | None = None
 
     # -- public API ---------------------------------------------------------
 
@@ -218,12 +225,39 @@ class BPPipeline:
               f"{float(np.max(bp_waveform)):.2f}] mmHg")
         sbp, dbp, info = extract_bp(bp_waveform, fs=self.FS_TARGET)
 
-        # ---- Step 9: Push result ----
+        # ---- Step 9: Temporal smoothing (median → EMA) ----
+        if not np.isnan(sbp):
+            self._sbp_history.append(sbp)
+        if not np.isnan(dbp):
+            self._dbp_history.append(dbp)
+
+        sbp_smooth = float(sbp)
+        dbp_smooth = float(dbp)
+
+        if len(self._sbp_history) > 0:
+            # Median filter to reject outliers
+            sbp_median = float(np.median(list(self._sbp_history)))
+            # EMA with α=0.3
+            if self._sbp_ema is None:
+                self._sbp_ema = sbp_median
+            else:
+                self._sbp_ema = 0.3 * sbp_median + 0.7 * self._sbp_ema
+            sbp_smooth = self._sbp_ema
+
+        if len(self._dbp_history) > 0:
+            dbp_median = float(np.median(list(self._dbp_history)))
+            if self._dbp_ema is None:
+                self._dbp_ema = dbp_median
+            else:
+                self._dbp_ema = 0.3 * dbp_median + 0.7 * self._dbp_ema
+            dbp_smooth = self._dbp_ema
+
+        # ---- Step 10: Push result ----
         result = BPResult(
             timestamp=time.time(),
             frame_index=self._frame_count,
-            sbp=sbp,
-            dbp=dbp,
+            sbp=sbp_smooth,
+            dbp=dbp_smooth,
             bp_waveform=bp_waveform.astype(np.float32),
             target_distance_m=target_bin * self.DISTANCE_PER_BIN,
             quality=info,

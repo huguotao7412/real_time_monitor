@@ -104,11 +104,11 @@ def wpd_separate(
     except Exception:
         breath_wave = signal.copy()
 
-    # Heart: sym8 wavelet, on SG derivative (MATLAB: sig_heart_pre = diff(FiltedData))
+    # Heart: sym8 wavelet, input already preprocessed by caller (MATLAB: diff(FiltedData))
     if heart_input_signal is None:
         heart_input = savgol_filter(signal, window_length=9, polyorder=3, deriv=1)
     else:
-        heart_input = savgol_filter(heart_input_signal, window_length=9, polyorder=3, deriv=1)
+        heart_input = heart_input_signal
 
     try:
         wp_heart = pywt.WaveletPacket(
