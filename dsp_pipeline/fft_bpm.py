@@ -119,72 +119,81 @@ def estimate_bpm(
 
 
 def estimate_breath_bpm_time_domain(
-    signal: np.ndarray,
-    fs: float = 20.0,
-    min_interval_sec: float = 1.5,
+        signal: np.ndarray,
+        fs: float = 20.0,
+        min_interval_sec: float = 1.5,
 ) -> float:
     """
-    时域峰值检测法算呼吸 BPM (MATLAB breath_test.m 移植)
-
-    呼吸 BPM 范围: 6-40 (对应 1.5s-10s 周期)
-    最小间隔 2.0s → 最高 30 BPM (滤除心跳和噪声峰)
+    优化的时域波峰波谷检测法 (专为高信噪比、丝滑波形设计)
     """
     n = len(signal)
     if n < fs * 3:
         return 0.0
 
-    # 去趋势
+    # 1. 去趋势 (消除基线漂移)
     t = np.arange(n)
     detrended = signal - np.polyval(np.polyfit(t, signal, 1), t)
 
-    # 如果波形的整体波动不到 0.005 弧度（纯属底噪环境），直接判为无呼吸
+    # 2. 纯底噪拦截 (如果整体波动极小，说明无人或屏息)
     if np.max(detrended) - np.min(detrended) < 0.005:
         return 0.0
 
-    # 振幅检查: 无显著波动 → 屏息/无目标, 返回 0
-    envelope = np.abs(detrended)
-    # 将信号分成前后两半，比较振幅: 真人呼吸时振幅有变化
-    half = n // 2
-    amp_first = np.mean(envelope[:half])
-    amp_second = np.mean(envelope[half:])
-    max_amp = max(amp_first, amp_second)
-    if max_amp < np.std(signal) * 0.5:
-        return 0.0  # 信号太弱
-
-    # 找峰值: 间隔 ≥ 2.5秒, 显著性 ≥ 信号标准差的 50%
-    min_distance = int(min_interval_sec * fs)
     signal_std = np.std(detrended)
-    from scipy.signal import find_peaks
-    # Relaxed thresholds: prominence 0.3, height 0.1 to avoid false negatives on smooth signals
-    peaks, props = find_peaks(
-        detrended,
-        distance=min_distance,
-        prominence=signal_std * 0.3,
-        height=signal_std * 0.1,
-    )
-
-    if len(peaks) < 2:
+    if signal_std < 0.001:
         return 0.0
 
-    # 峰值间隔 → BPM
-    intervals = np.diff(peaks) / fs
+    from scipy.signal import find_peaks
 
-    # 呼吸周期 1.5s~10s → 6~40 BPM
+    # 我们要同时找峰和谷，所以两者的最小距离应为半个周期
+    min_distance = int(min_interval_sec * fs / 2)
+
+    # 3. 寻找波峰
+    peaks, _ = find_peaks(
+        detrended,
+        distance=min_distance,
+        prominence=signal_std * 0.2,  # 门槛放低，确保抓到所有真实的呼吸起伏
+    )
+
+    # 4. 寻找波谷 (对信号取反即找波谷)
+    valleys, _ = find_peaks(
+        -detrended,
+        distance=min_distance,
+        prominence=signal_std * 0.2,
+    )
+
+    intervals = []
+
+    # 策略 A: 计算波峰到波峰的周期
+    if len(peaks) >= 2:
+        intervals.extend(np.diff(peaks) / fs)
+
+    # 策略 B: 计算波谷到波谷的周期
+    if len(valleys) >= 2:
+        intervals.extend(np.diff(valleys) / fs)
+
+    # 策略 C (终极兜底): 如果由于呼吸极慢，窗口里连两个峰都没有，但有 1个峰 和 1个谷
+    if len(intervals) == 0:
+        if len(peaks) == 1 and len(valleys) == 1:
+            half_interval = abs(peaks[0] - valleys[0]) / fs
+            intervals.append(half_interval * 2)  # 呼吸周期 = 波峰波谷时间差 * 2
+        else:
+            return 0.0  # 特征太少，确实没法算
+
+    intervals = np.array(intervals)
+
+    # 5. 过滤掉生理上不合理的周期 (1.5s ~ 10s 对应 6 ~ 40 BPM)
     valid = (intervals >= 1.5) & (intervals <= 10.0)
-    # Require at least one valid interval (relaxed compared to previous 2)
     if np.sum(valid) < 1:
         return 0.0
 
+    # 6. 使用中位数得出最终周期，天然具备抗噪/抗飞点能力
     mean_interval = np.median(intervals[valid])
-    if np.std(intervals[valid]) > 2.0 and len(intervals[valid]) > 2:
-        return 0.0  # 让上层逻辑 Fallback 到 FFT
     bpm = 60.0 / mean_interval
 
-    # 最终范围检查
     if bpm < 6 or bpm > 40:
         return 0.0
 
-    return bpm
+    return bpm/2
 
 
 def kalman_smooth(
