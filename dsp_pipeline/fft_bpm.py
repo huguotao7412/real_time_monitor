@@ -26,7 +26,13 @@ def estimate_bpm(
     poly = np.polyfit(t, signal, 3)  # 三次去趋势 (MATLAB: detrend(signal, 3))
     detrended = signal - np.polyval(poly, t)
 
-    windowed = detrended * np.hanning(n)
+    # 对于低频窄带信号（例如呼吸），不要再额外加窗 — 窗口会削弱本来就很短的周期的能量
+    if valid_band[1] <= 1.0:
+        # 呼吸：保持矩形窗以保留能量
+        windowed = detrended
+    else:
+        # 心跳或高频段使用汉宁窗以减少谱泄漏
+        windowed = detrended * np.hanning(n)
     spectrum = np.abs(np.fft.rfft(windowed, n=n_fft))
     freqs = np.fft.rfftfreq(n_fft, d=1.0 / fs)
 
@@ -111,7 +117,7 @@ def estimate_bpm(
 def estimate_breath_bpm_time_domain(
     signal: np.ndarray,
     fs: float = 20.0,
-    min_interval_sec: float = 2.0,
+    min_interval_sec: float = 1.5,
 ) -> float:
     """
     时域峰值检测法算呼吸 BPM (MATLAB breath_test.m 移植)
@@ -145,11 +151,12 @@ def estimate_breath_bpm_time_domain(
     min_distance = int(min_interval_sec * fs)
     signal_std = np.std(detrended)
     from scipy.signal import find_peaks
+    # Relaxed thresholds: prominence 0.3, height 0.1 to avoid false negatives on smooth signals
     peaks, props = find_peaks(
         detrended,
         distance=min_distance,
-        prominence=signal_std * 0.5,
-        height=signal_std * 0.2,
+        prominence=signal_std * 0.3,
+        height=signal_std * 0.1,
     )
 
     if len(peaks) < 2:
@@ -160,7 +167,8 @@ def estimate_breath_bpm_time_domain(
 
     # 呼吸周期 1.5s~10s → 6~40 BPM
     valid = (intervals >= 1.5) & (intervals <= 10.0)
-    if np.sum(valid) < 2:
+    # Require at least one valid interval (relaxed compared to previous 2)
+    if np.sum(valid) < 1:
         return 0.0
 
     mean_interval = np.mean(intervals[valid])
@@ -236,11 +244,12 @@ def estimate_bpm_stft(
     if n < 64:
         return 0.0, 0.0
 
-    # --- Breath: 放弃自相关，直接使用改进后的高精度抗谐波 FFT ---
-    breath_bpm, _ = estimate_bpm(breath_signal, fs, (0.1, 0.8), n_fft=4096,
-                                 enable_subharmonic_rescue=True)
+    # --- Breath: 优先使用时域峰值法（针对平滑正弦波更精确） ---
+    breath_bpm = estimate_breath_bpm_time_domain(breath_signal, fs, min_interval_sec=1.5)
+    # 只有在时域失败时，才退回到 FFT/STFT 的谱估计
     if breath_bpm <= 0:
-        breath_bpm = estimate_breath_bpm_time_domain(breath_signal, fs)
+        breath_bpm, _ = estimate_bpm(breath_signal, fs, (0.1, 0.8), n_fft=4096,
+                                     enable_subharmonic_rescue=True)
 
     # --- Heart STFT (MATLAB: 25% hamming, 80% overlap) ---
     heart_win = max(64, int(n * 0.6))
