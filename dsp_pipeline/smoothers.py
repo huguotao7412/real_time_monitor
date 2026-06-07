@@ -61,7 +61,11 @@ def apply_smoothing_chain(state: SmootherState, raw_bpm: float, phase_range: flo
     Returns smoothed BPM (float). Updates state in-place.
     """
     if raw_bpm <= 0:
-        # invalid measurement: keep previous EMA if any, otherwise return 0
+        # 目标丢失或信号无效时，必须清空历史状态，防止幽灵滞留
+        state.raw_history.clear()
+        state.last_valid = None
+        state.ema_value = None
+        state.jump_hold_count = 0
         return 0.0
 
     # 1) median prefilter

@@ -54,10 +54,8 @@ def _reconstruct_band(
 
     for leaf in leaf_nodes:
         if leaf.path not in all_target_leaves:
-            n_leaf = len(leaf.data)
-            if n_leaf > 0:
-                window = np.hanning(n_leaf)
-                leaf.data[:] = leaf.data * (1.0 - window)
+            # 直接将非目标频段的系数彻底置零
+            leaf.data[:] = 0.0
 
     result = wp.reconstruct(update=False)
 

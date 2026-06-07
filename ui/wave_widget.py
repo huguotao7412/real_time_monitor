@@ -136,7 +136,9 @@ class WaveWidget(QWidget):
         if self._fill_mode and hasattr(self, "fill"):
             self._zero_line.setData(x, np.zeros_like(self._data))
             self.fill.setCurves(self.curve, self._zero_line)
-            self._fill_brush.setColor(QColor(c.red(), c.green(), c.blue(), 60))
+            fill_color = QColor(c.red(), c.green(), c.blue(), 60)
+            self._fill_brush = pg.mkBrush(fill_color)
+            self.fill.setBrush(self._fill_brush)
 
     # ── internal helpers ────────────────────────────────────────
 

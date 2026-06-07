@@ -35,9 +35,9 @@ class BreathingPetals(QWidget):
     def set_breath_bpm(self, bpm: float, dt: float) -> None:
         """Update animation period from BPM. dt is kept for API compatibility
         but no longer used for manual phase integration."""
-        if bpm > 0 and bpm != self._breath_bpm:
+        if bpm > 0 and abs(bpm - self._breath_bpm) > 1.0:
             self._breath_bpm = bpm
-            period_ms = int(60000.0 / bpm)  # one full breath cycle
+            period_ms = int(60000.0 / bpm)
             self._anim.setDuration(period_ms)
             if self._anim.state() != QVariantAnimation.State.Running:
                 self._anim.start()
