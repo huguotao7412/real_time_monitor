@@ -70,6 +70,7 @@ class Pipeline:
         self._cfar_rescan_interval: int = int(FS_HZ * 5.0)
         self._current_bin_snr: float = 0.0
         self.DISTANCE_PER_BIN: float = 0.05  # RS6240 range resolution
+        self._MIN_RANGE_BIN: int = 10  # 跳过近场天线耦合杂波 (bins 1-9 ≈ 2.5-22.5cm)
 
         # Feature toggles
         self._use_beamforming = use_beamforming
@@ -236,14 +237,19 @@ class Pipeline:
             mean_bin_frame_rx, self.DISTANCE_PER_BIN, self._cfar_state, candidates
         )
         confirmed = debug.get("confirmed_list", np.array([]))
+        # Filter: skip near-field bins (antenna coupling / enclosure reflections)
         if len(confirmed) > 0:
-            best_idx = np.argmin(confirmed[:, 0])  # closest bin
+            valid_mask = confirmed[:, 0] >= self._MIN_RANGE_BIN
+            confirmed = confirmed[valid_mask]
+        if len(confirmed) > 0:
+            best_idx = np.argmin(confirmed[:, 0])  # closest valid bin
             best_bin = float(confirmed[best_idx, 0])
             snr = float(confirmed[best_idx, 2])
             return best_bin, snr
-        # Fallback: 1D CFAR only
-        if len(candidates) > 0:
-            return float(candidates[0]), 0.0
+        # Fallback: 1D CFAR only (also skip near-field bins)
+        valid_candidates = [c for c in candidates if c >= self._MIN_RANGE_BIN] if len(candidates) > 0 else []
+        if len(valid_candidates) > 0:
+            return float(valid_candidates[0]), 0.0
         # Ultimate fallback
         best_bin = find_best_range_bin(mean_bin_frame_rx, fs=FS_HZ)
         return best_bin, 0.0
@@ -263,6 +269,11 @@ class Pipeline:
             mean_bin_frame_rx, self.DISTANCE_PER_BIN, self._cfar_state, candidates
         )
         confirmed = debug.get("confirmed_list", np.array([]))
+
+        # Filter: skip near-field bins (antenna coupling / enclosure reflections)
+        if len(confirmed) > 0:
+            valid_mask = confirmed[:, 0] >= self._MIN_RANGE_BIN
+            confirmed = confirmed[valid_mask]
 
         # Compute current best_bin's actual SNR from the rolling buffer
         current_actual_snr = 0.0

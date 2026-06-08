@@ -76,4 +76,4 @@ BREATH_USE_NEW_SMOOTHER = True
 HEART_USE_NEW_SMOOTHER = True
 
 # === 距离标定 ===
-RANGE_HARDWARE_OFFSET_M: float = 0.35  # 雷达天线固有延迟补偿，用卷尺实测后标定
+RANGE_HARDWARE_OFFSET_M: float = 0.19  # 雷达天线固有延迟补偿，用卷尺实测后标定（BP: 16cm真值→35cm读数, offset=0.19）
