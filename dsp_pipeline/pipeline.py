@@ -268,7 +268,7 @@ class Pipeline:
         current_actual_snr = 0.0
         if len(confirmed) > 0:
             for entry in confirmed:
-                if int(entry[0]) == self._best_bin:
+                if int(entry[0]) == int(self._best_bin):
                     current_actual_snr = float(entry[2])
                     break
 

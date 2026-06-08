@@ -174,7 +174,7 @@ class HRMode(MonitorMode):
         best_bin = self._pipeline.best_range_bin
         if best_bin is not None and best_bin > 0:
             target_distance_m = (best_bin * 0.025) - RANGE_HARDWARE_OFFSET_M
-            target_distance_m = max(0.01, target_distance_m)
+            target_distance_m = max(0.0, target_distance_m)
         else:
             target_distance_m = 0.0
 
