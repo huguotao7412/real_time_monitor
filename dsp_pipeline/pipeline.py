@@ -171,9 +171,10 @@ class Pipeline:
         rx_slice = data_cube[start_bin:end_bin + 1, 0, :]  # [n_bins, rx]
         full_rx = np.mean(rx_slice, axis=0)  # [rx]
         # Select channels [0,1,4,5] for MUSIC/LCMV (MATLAB [1,2,5,6])
-        if len(full_rx) > max(self._MUSIC_CHANNELS):
+        if len(full_rx) >= max(self._MUSIC_CHANNELS) + 1:
             return full_rx[self._MUSIC_CHANNELS]
         return full_rx
+
 
     def _process_frame(self, frame: RadarFrame) -> VitalSigns | None:
         data_cube = frame.data_cube
@@ -368,7 +369,7 @@ class Pipeline:
             _, heart_wave = wpd_separate(
                 clean_disp, FS_HZ, heart_input_signal=heart_diff
             )
-        except Exception:
+        except Exception as e:  # 必须将异常捕获为 e
             print(f"[Advanced DSP] WPD Fallback triggered: {e}")
             enhanced = savgol_filter(filted, window_length=9, polyorder=3, deriv=1)
             heart_wave = self._filter.filter_heart(enhanced)

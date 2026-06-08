@@ -350,7 +350,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         if self._io_thread:
-            self._io_thread.join(timeout=5)
+            self._io_thread.join(timeout=0.1)
         if self._serial_mgr:
             self._serial_mgr.close()
         self._current_mode.stop()
