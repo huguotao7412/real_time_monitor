@@ -1,13 +1,24 @@
 """Range Bin 选择 — 基于 MATLAB DataProcess.m 的自适应 CFAR 阈值检测"""
 
 import numpy as np
+from scipy.signal import find_peaks
+
+
+def _interpolate_peak(power: np.ndarray, idx: int) -> float:
+    """二次插值求亚区间峰值偏移量，返回精确的小数 bin 索引."""
+    alpha = power[idx - 1] if idx > 0 else power[idx]
+    beta = power[idx]
+    gamma = power[idx + 1] if idx < len(power) - 1 else power[idx]
+    denom = alpha - 2 * beta + gamma
+    p = 0.0 if denom == 0 else 0.5 * (alpha - gamma) / denom
+    return float(idx + p)
 
 
 def find_best_range_bin(
     data_cube: np.ndarray,
     fs: float = 20.0,
     breath_band: tuple[float, float] = (0.1, 0.8),
-) -> int:
+) -> float:
     """
     自适应 CFAR 目标检测 (移植自 MATLAB DataProcess.findTargetBin)
 
@@ -16,6 +27,7 @@ def find_best_range_bin(
       2. 取底部 70% 的低功率点估计噪声参数 (mean, std)
       3. 动态阈值 = noise_mean + 3 * noise_std
       4. 找超过阈值的峰值, 选最近的一个 (离人体最近的目标)
+      5. 二次插值获得亚区间精度
     """
     n_range, n_doppler, n_rx = data_cube.shape
     if n_doppler > 0:
@@ -34,22 +46,20 @@ def find_best_range_bin(
     noise_std = np.std(noise_samples)
 
     # 3. 自适应阈值 (alpha=3.0 = 99.7% 置信度, MATLAB 原版)
-    alpha = 3.0
-    threshold = noise_mean + alpha * noise_std
+    threshold = noise_mean + 3.0 * noise_std
 
     # 4. 寻找超过阈值的峰值
-    from scipy.signal import find_peaks
     peaks, props = find_peaks(power_profile, height=threshold)
 
     if len(peaks) > 0:
-        # 选峰值最高的那个 (对应最强反射 → 最近的人体)
         best_local = peaks[np.argmax(props["peak_heights"])]
-        return best_local + 1  # +1 因为跳过了 bin 0
+        return _interpolate_peak(power_profile, best_local) + 1  # +1 补偿跳过 bin 0
 
     # 5. 找不到峰值 → 降级: 仅在中间距离找功率最大的 bin
     search_start = max(2, int(n_range * 0.04))
     search_end = min(n_range - 3, int(n_range * 0.94))
     if search_end <= search_start:
-        return int(np.argmax(power_profile)) + 1
+        return float(np.argmax(power_profile) + 1)
     mid_power = power_profile[search_start - 1 : search_end - 1]
-    return search_start + int(np.argmax(mid_power))
+    best_mid = int(np.argmax(mid_power))
+    return _interpolate_peak(mid_power, best_mid) + search_start
