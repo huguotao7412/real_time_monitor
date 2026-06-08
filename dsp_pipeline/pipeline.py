@@ -58,7 +58,7 @@ class Pipeline:
         # Scalar phase buffer kept as fallback
         self._phase_buffer: deque[float] = deque(maxlen=WINDOW_SIZE)
 
-        self._best_bin: int | None = None
+        self._best_bin: float | None = None
         self._last_bpm_update = 0
         self.last_heartbeat = 0.0
 
@@ -128,7 +128,7 @@ class Pipeline:
         return 1.0
 
     @property
-    def best_range_bin(self) -> int | None:
+    def best_range_bin(self) -> float | None:
         return self._best_bin
 
     def start(self) -> None:
@@ -164,8 +164,9 @@ class Pipeline:
         Returns shape [rx_antennas] complex array.
         """
         n_range = data_cube.shape[0]
-        start_bin = max(1, self._best_bin - 2)
-        end_bin = min(n_range - 1, self._best_bin + 2)
+        bin_idx = int(self._best_bin)
+        start_bin = max(1, bin_idx - 2)
+        end_bin = min(n_range - 1, bin_idx + 2)
         rx_slice = data_cube[start_bin:end_bin + 1, 0, :]  # [n_bins, rx]
         full_rx = np.mean(rx_slice, axis=0)  # [rx]
         # Select channels [0,1,4,5] for MUSIC/LCMV (MATLAB [1,2,5,6])
@@ -237,12 +238,12 @@ class Pipeline:
         confirmed = debug.get("confirmed_list", np.array([]))
         if len(confirmed) > 0:
             best_idx = np.argmin(confirmed[:, 0])  # closest bin
-            best_bin = int(confirmed[best_idx, 0])
+            best_bin = float(confirmed[best_idx, 0])
             snr = float(confirmed[best_idx, 2])
             return best_bin, snr
         # Fallback: 1D CFAR only
         if len(candidates) > 0:
-            return int(candidates[0]), 0.0
+            return float(candidates[0]), 0.0
         # Ultimate fallback
         best_bin = find_best_range_bin(mean_bin_frame_rx, fs=FS_HZ)
         return best_bin, 0.0
@@ -273,7 +274,7 @@ class Pipeline:
 
         if len(confirmed) > 0:
             best_idx = np.argmin(confirmed[:, 0])
-            best_bin = int(confirmed[best_idx, 0])
+            best_bin = float(confirmed[best_idx, 0])
             snr = float(confirmed[best_idx, 2])
             if best_bin != self._best_bin:
                 return best_bin, snr, current_actual_snr
