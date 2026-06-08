@@ -10,8 +10,11 @@ def _interpolate_peak(power: np.ndarray, idx: int) -> float:
     beta = power[idx]
     gamma = power[idx + 1] if idx < len(power) - 1 else power[idx]
     denom = alpha - 2 * beta + gamma
-    p = 0.0 if denom == 0 else 0.5 * (alpha - gamma) / denom
-    return float(idx + p)
+    if abs(denom) < 1e-15:
+        p = 0.0
+    else:
+        p = 0.5 * (alpha - gamma) / denom
+    return float(np.clip(idx + p, 0, len(power) - 1))
 
 
 def find_best_range_bin(
@@ -52,6 +55,7 @@ def find_best_range_bin(
     peaks, props = find_peaks(power_profile, height=threshold)
 
     if len(peaks) > 0:
+        # 选峰值最高的那个 (对应最强反射 → 最近的人体)
         best_local = peaks[np.argmax(props["peak_heights"])]
         return _interpolate_peak(power_profile, best_local) + 1  # +1 补偿跳过 bin 0
 
