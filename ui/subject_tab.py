@@ -36,8 +36,15 @@ class SubjectTab(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 16, 20, 16)
 
-        # Top row: SQI indicator (right-aligned)
+        # Top row: distance label (left) + SQI indicator (right)
         top_row = QHBoxLayout()
+        self._distance_label = QLabel(tr("目标距离: -- cm"))
+        self._distance_label.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
+        self._distance_label.setStyleSheet(
+            "color: #3498db; background-color: rgba(52, 152, 219, 0.1);"
+            "border-radius: 5px; padding: 5px;"
+        )
+        top_row.addWidget(self._distance_label)
         top_row.addStretch()
         self._sqi = SqiIndicator()
         top_row.addWidget(self._sqi)
@@ -155,6 +162,7 @@ class SubjectTab(QWidget):
         quality: dict | None,
         calibration_done: bool,
         calibration_progress: float,
+        target_distance_m: float = 0.0,
     ) -> None:
         now = time.time()
         dt = now - self._last_update_time
@@ -173,6 +181,14 @@ class SubjectTab(QWidget):
             if not self._calibration_was_done:
                 self._calibration_overlay.fade_out()
                 self._calibration_was_done = True
+
+        # Distance label
+        if target_distance_m > 0:
+            self._distance_label.setText(
+                tr("目标距离: {:.1f} cm").format(target_distance_m * 100)
+            )
+        else:
+            self._distance_label.setText(tr("目标距离: -- cm"))
 
         # SQI
         phase_range = quality.get("phase_range", 0.0) if quality else 0.0
@@ -261,6 +277,7 @@ class SubjectTab(QWidget):
         self._error_overlay.hide()
         self._error_start_time = None
         self.setStyleSheet("")
+        self._distance_label.setText(tr("目标距离: -- cm"))
 
 
 class HeartBeatIcon(QWidget):
