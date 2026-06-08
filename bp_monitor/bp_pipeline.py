@@ -28,7 +28,7 @@ from collections import deque
 import numpy as np
 from scipy.signal import resample_poly
 
-from config.protocol import RAW_QUEUE_MAXSIZE, DISPLAY_QUEUE_MAXSIZE
+from config.protocol import RAW_QUEUE_MAXSIZE, DISPLAY_QUEUE_MAXSIZE, RANGE_HARDWARE_OFFSET_M
 from models.radar_frame import RadarFrame
 from bp_monitor.bp_models import BPResult
 from bp_monitor.bp_cfar import find_target_bins_1d, adaptive_2d_cfar
@@ -51,7 +51,7 @@ class BPPipeline:
     FS_TARGET = 50.0
     N_INPUT = 256
     STEP_FRAMES = 100   # sliding window step (~0.5 s at 200 Hz)
-    DISTANCE_PER_BIN = 0.05
+    DISTANCE_PER_BIN = 0.039
 
     def __init__(self, weights_path: str = "bp_matlab/bp_weights.mat"):
         self.raw_queue: queue.Queue[RadarFrame] = queue.Queue(maxsize=RAW_QUEUE_MAXSIZE)
@@ -74,6 +74,7 @@ class BPPipeline:
         self._dbp_history: deque[float] = deque(maxlen=10)
         self._sbp_ema: float | None = None
         self._dbp_ema: float | None = None
+        self._bad_signal_count: int = 0
 
     # -- public API ---------------------------------------------------------
 
@@ -130,8 +131,8 @@ class BPPipeline:
                 )
                 if len(candidates) > 0:
                     self._target_bin = int(candidates[0])
-                    print(f"[BPPipeline] Target locked: bin={self._target_bin} "
-                          f"({self._target_bin * self.DISTANCE_PER_BIN:.2f}m)")
+                    real_dist = max(0.01, self._target_bin * self.DISTANCE_PER_BIN - RANGE_HARDWARE_OFFSET_M)
+                    print(f"[BPPipeline] Target locked: bin={self._target_bin} ({real_dist:.2f}m)")
             # Fallback after 256 frames: pick strongest bin
             if self._target_bin is None and n >= 256:
                 acc = np.concatenate(self._complex_buffer, axis=1)
@@ -139,13 +140,15 @@ class BPPipeline:
                 energy = np.mean(np.abs(acc_bg), axis=(1, 2))
                 energy[:2] = 0  # skip near-field DC
                 self._target_bin = int(np.argmax(energy))
-                print(f"[BPPipeline] Fallback lock: bin={self._target_bin} "
-                      f"({self._target_bin * self.DISTANCE_PER_BIN:.2f}m)")
+                real_dist = max(0.01, self._target_bin * self.DISTANCE_PER_BIN - RANGE_HARDWARE_OFFSET_M)
+                print(f"[BPPipeline] Fallback lock: bin={self._target_bin} ({real_dist:.2f}m)")
             if self._target_bin is None:
                 return  # keep accumulating
 
         # ---- Phase 2: Wait for full batch ----
-        if len(self._complex_buffer) < self.MAX_FRAMES:
+        is_cold_start = (self._sbp_ema is None)
+        required_frames = 512 if is_cold_start else self.MAX_FRAMES
+        if len(self._complex_buffer) < required_frames:
             return
 
         # ---- Full MATLAB pipeline on 1024 frames ----
@@ -225,6 +228,19 @@ class BPPipeline:
               f"{float(np.max(bp_waveform)):.2f}] mmHg")
         sbp, dbp, info = extract_bp(bp_waveform, fs=self.FS_TARGET)
 
+        if np.isnan(sbp):
+            self._bad_signal_count += 1
+        else:
+            self._bad_signal_count = 0
+
+        if self._bad_signal_count >= 4:
+            print("[BPPipeline] Target lost or moved! Forcing re-acquire...")
+            self._target_bin = None
+            self._complex_buffer.clear()
+            self._cfar_state = None  # 关键：清空 CFAR 的死板记忆
+            self._bad_signal_count = 0
+            return
+
         # ---- Step 9: Temporal smoothing (median → EMA) ----
         if not np.isnan(sbp):
             self._sbp_history.append(sbp)
@@ -253,13 +269,15 @@ class BPPipeline:
             dbp_smooth = self._dbp_ema
 
         # ---- Step 10: Push result ----
+        raw_distance = target_bin * self.DISTANCE_PER_BIN
+        real_distance = max(0.01, raw_distance - RANGE_HARDWARE_OFFSET_M)
         result = BPResult(
             timestamp=time.time(),
             frame_index=self._frame_count,
             sbp=sbp_smooth,
             dbp=dbp_smooth,
             bp_waveform=bp_waveform.astype(np.float32),
-            target_distance_m=target_bin * self.DISTANCE_PER_BIN,
+            target_distance_m=real_distance,
             quality=info,
         )
         self._push_to_display(result)
@@ -268,8 +286,9 @@ class BPPipeline:
         self._complex_buffer = self._complex_buffer[self.STEP_FRAMES:]
 
         if not np.isnan(sbp):
+            real_dist = max(0.01, target_bin * self.DISTANCE_PER_BIN - RANGE_HARDWARE_OFFSET_M)
             print(f"[BPPipeline] Result: SBP={sbp:.1f} DBP={dbp:.1f} mmHg "
-                  f"dist={target_bin * self.DISTANCE_PER_BIN:.2f}m")
+                  f"dist={real_dist:.2f}m")
 
     def _push_to_display(self, result: BPResult) -> None:
         try:

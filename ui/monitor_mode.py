@@ -126,7 +126,7 @@ class HRMode(MonitorMode):
         return RadarFrame(
             timestamp=time.time(),
             frame_index=frame_index,
-            header=FrameHeader(0, 1, 4, 2, 58000, 128, 1, 3000, 25, 1920, 60),
+            header=FrameHeader(0, 1, 4, 2, 58000, 128, 1, 3000, 50, 1920, 60),
             data_cube=rx_combined.reshape(-1, 1, 1),
         )
 
@@ -173,8 +173,8 @@ class HRMode(MonitorMode):
         # Compute physical distance from best_range_bin
         best_bin = self._pipeline.best_range_bin
         if best_bin is not None and best_bin > 0:
-            target_distance_m = (best_bin * 0.025) - RANGE_HARDWARE_OFFSET_M
-            target_distance_m = max(0.0, target_distance_m)
+            target_distance_m = (best_bin * 0.039) - RANGE_HARDWARE_OFFSET_M
+            target_distance_m = max(0.01, target_distance_m)
         else:
             target_distance_m = 0.0
 

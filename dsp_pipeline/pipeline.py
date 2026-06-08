@@ -66,11 +66,11 @@ class Pipeline:
         self._cfar_accumulator: list[np.ndarray] = []
         self._cfar_state: dict | None = None
         self._cfar_rolling_buffer: deque[np.ndarray] = deque(maxlen=int(FS_HZ * 2.5))
-        self._cfar_initial_frames: int = int(FS_HZ * 2.5)
+        self._cfar_initial_frames: int = int(FS_HZ * 1.0)
         self._cfar_rescan_interval: int = int(FS_HZ * 5.0)
         self._current_bin_snr: float = 0.0
-        self.DISTANCE_PER_BIN: float = 0.05  # RS6240 range resolution
-        self._MIN_RANGE_BIN: int = 10  # 跳过近场天线耦合杂波 (bins 1-9 ≈ 2.5-22.5cm)
+        self.DISTANCE_PER_BIN: float = 0.039  # RS6240 range resolution
+        self._MIN_RANGE_BIN: int = 4  # 跳过近场天线耦合杂波 (bins 1-9 ≈ 2.5-22.5cm)
 
         # Feature toggles
         self._use_beamforming = use_beamforming
@@ -189,10 +189,14 @@ class Pipeline:
             if self._best_bin is None:
                 return None
         elif self._frame_count > 0 and self._frame_count % self._cfar_rescan_interval == 0:
-            new_bin, new_snr, current_actual_snr = self._run_2d_cfar_rescan()
-            if new_bin is not None and current_actual_snr > 0 and new_snr > current_actual_snr * 1.5:
-                self._best_bin = new_bin
-                self._current_bin_snr = new_snr
+                new_bin, new_snr, current_actual_snr = self._run_2d_cfar_rescan()
+                if new_bin is not None:
+                    # 修复：当人离开原位置时，旧位置 SNR 为 0.0。
+                    # 只要旧位置没信号了，或者新位置信号比旧位置强 1.2 倍，就果断更新距离！
+                    if current_actual_snr == 0.0 or new_snr > current_actual_snr * 1.2:
+                        self._best_bin = new_bin
+                        self._current_bin_snr = new_snr
+                        print(f"[DSP] Target moved! Range updated to bin: {self._best_bin}")
 
         # 2. Extract per-RX complex data and buffer
         rx_complex = None
