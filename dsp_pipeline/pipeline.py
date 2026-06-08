@@ -360,7 +360,7 @@ class Pipeline:
         # BPM estimation: FFT breath + STFT heart (MATLAB PhaseProcess port)
         try:
             breath_bpm, heart_bpm = estimate_bpm_stft(
-                breath_wave, heart_wave, FS_HZ
+                breath_wave, heart_wave, FS_HZ,1024, raw_displacement=displacement
             )
         except Exception:
             breath_bpm, _ = estimate_bpm(
@@ -465,7 +465,7 @@ class Pipeline:
 
             if not self._use_advanced_dsp or breath_bpm <= 0:
                 breath_bpm = estimate_breath_bpm_time_domain(
-                    breath_signal, fs=FS_HZ, min_interval_sec=1.5
+                    no_dc, fs=FS_HZ, min_interval_sec=1.0
                 )
                 if breath_bpm <= 0:
                     breath_bpm, _ = estimate_bpm(

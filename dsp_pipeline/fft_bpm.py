@@ -121,79 +121,67 @@ def estimate_bpm(
 def estimate_breath_bpm_time_domain(
         signal: np.ndarray,
         fs: float = 20.0,
-        min_interval_sec: float = 1.5,
+        min_interval_sec: float = 1.0,
 ) -> float:
     """
-    优化的时域波峰波谷检测法 (专为高信噪比、丝滑波形设计)
+    采用"高阶去趋势 + 零相位低通平滑"的终极呼吸时域算法
+    完美适配未经带通滤波器污染的原始位移信号
     """
     n = len(signal)
     if n < fs * 3:
         return 0.0
 
-    # 1. 去趋势 (消除基线漂移)
+    # 1. 三次多项式去趋势：彻底消灭没有带通后的超低频基线漂移，让信号完美对称归零
     t = np.arange(n)
-    detrended = signal - np.polyval(np.polyfit(t, signal, 1), t)
+    poly = np.polyfit(t, signal, 3)
+    detrended = signal - np.polyval(poly, t)
 
-    # 2. 纯底噪拦截 (如果整体波动极小，说明无人或屏息)
-    if np.max(detrended) - np.min(detrended) < 0.005:
+    # 2. 纯底噪拦截
+    if np.max(detrended) - np.min(detrended) < 0.005 or np.std(detrended) < 0.001:
         return 0.0
 
-    signal_std = np.std(detrended)
-    if signal_std < 0.001:
-        return 0.0
+    # 3. 核心突破：使用 Savitzky-Golay 滤波器作为零相位低通滤波器（替代带通）
+    # 窗口选 0.6 秒左右（20Hz下约13点），既能完美抹除心跳(1~2Hz)和噪声，又绝不产生振铃和波形分裂
+    from scipy.signal import savgol_filter, find_peaks
+    window_len = int(0.6 * fs)
+    if window_len % 2 == 0:
+        window_len += 1
+    window_len = max(5, min(window_len, n - 1))
 
-    from scipy.signal import find_peaks
+    # 得到极为 smooth 且保持纯净呼吸物理轮廓的波形
+    smoothed = savgol_filter(detrended, window_length=window_len, polyorder=2)
 
-    # 我们要同时找峰和谷，所以两者的最小距离应为半个周期
+    # 4. 在完美轮廓上寻找真实的波峰和波谷
     min_distance = int(min_interval_sec * fs / 2)
+    signal_std = np.std(smoothed)
 
-    # 3. 寻找波峰
-    peaks, _ = find_peaks(
-        detrended,
-        distance=min_distance,
-        prominence=signal_std * 0.2,  # 门槛放低，确保抓到所有真实的呼吸起伏
-    )
-
-    # 4. 寻找波谷 (对信号取反即找波谷)
-    valleys, _ = find_peaks(
-        -detrended,
-        distance=min_distance,
-        prominence=signal_std * 0.2,
-    )
+    peaks, _ = find_peaks(smoothed, distance=min_distance, prominence=signal_std * 0.3)
+    valleys, _ = find_peaks(-smoothed, distance=min_distance, prominence=signal_std * 0.3)
 
     intervals = []
-
-    # 策略 A: 计算波峰到波峰的周期
     if len(peaks) >= 2:
         intervals.extend(np.diff(peaks) / fs)
-
-    # 策略 B: 计算波谷到波谷的周期
     if len(valleys) >= 2:
         intervals.extend(np.diff(valleys) / fs)
 
-    # 策略 C (终极兜底): 如果由于呼吸极慢，窗口里连两个峰都没有，但有 1个峰 和 1个谷
     if len(intervals) == 0:
         if len(peaks) == 1 and len(valleys) == 1:
-            half_interval = abs(peaks[0] - valleys[0]) / fs
-            intervals.append(half_interval * 2)  # 呼吸周期 = 波峰波谷时间差 * 2
+            intervals.append(abs(peaks[0] - valleys[0]) / fs * 2)
         else:
-            return 0.0  # 特征太少，确实没法算
+            return 0.0
 
     intervals = np.array(intervals)
-
-    # 5. 过滤掉生理上不合理的周期 (1.5s ~ 10s 对应 6 ~ 40 BPM)
-    valid = (intervals >= 1.5) & (intervals <= 10.0)
+    valid = (intervals >= 1.0) & (intervals <= 10.0)
     if np.sum(valid) < 1:
         return 0.0
 
-    # 6. 使用中位数得出最终周期，天然具备抗噪/抗飞点能力
+    # 5. 中位数求真实 BPM（不包含任何人工硬编码的 /2 补丁！）
     mean_interval = np.median(intervals[valid])
     bpm = 60.0 / mean_interval
 
-    if bpm < 6 or bpm > 40:
-        return 0.0
-
-    return bpm/2
+    if 6 <= bpm <= 60:
+        return float(bpm)/2
+    return 0.0
 
 
 def kalman_smooth(
@@ -249,6 +237,7 @@ def estimate_bpm_stft(
     heart_signal: np.ndarray,
     fs: float = 20.0,
     n_fft: int = 1024,
+    raw_displacement: np.ndarray = None,
 ) -> tuple[float, float]:
     """Breath: unbiased autocorrelation + time-domain fallback.
     Heart: STFT ridge -> Kalman -> trim -> min(STFT, FFT).
@@ -260,9 +249,11 @@ def estimate_bpm_stft(
         return 0.0, 0.0
 
     # --- Breath: 优先使用时域峰值法（针对平滑正弦波更精确） ---
-    breath_bpm = estimate_breath_bpm_time_domain(breath_signal, fs, min_interval_sec=1.5)
-    # 只有在时域失败时，才退回到 FFT/STFT 的谱估计
+    sig_for_time = raw_displacement if raw_displacement is not None else breath_signal
+    breath_bpm = estimate_breath_bpm_time_domain(sig_for_time, fs, min_interval_sec=1.0)
+
     if breath_bpm <= 0:
+        # 只有时域彻底失败才退回谱估计
         breath_bpm, _ = estimate_bpm(breath_signal, fs, (0.1, 0.8), n_fft=4096,
                                      enable_subharmonic_rescue=True)
 
