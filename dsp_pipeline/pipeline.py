@@ -228,7 +228,7 @@ class Pipeline:
         background = np.mean(bin_frame_rx, axis=1, keepdims=True)
         return bin_frame_rx - background
 
-    def _run_2d_cfar_lock(self) -> tuple[int | None, float]:
+    def _run_2d_cfar_lock(self) -> tuple[float | None, float]:
         """1D coarse + 2D refinement CFAR for initial target lock."""
         mean_bin_frame_rx = self._build_mean_bin_frame_rx(self._cfar_accumulator)
         candidates = coarse_1d_cfar_candidates(mean_bin_frame_rx)
@@ -248,7 +248,7 @@ class Pipeline:
         best_bin = find_best_range_bin(mean_bin_frame_rx, fs=FS_HZ)
         return best_bin, 0.0
 
-    def _run_2d_cfar_rescan(self) -> tuple[int | None, float, float]:
+    def _run_2d_cfar_rescan(self) -> tuple[float | None, float, float]:
         """Periodic re-scan using rolling buffer.
 
         Returns (new_bin, new_snr, current_actual_snr). current_actual_snr is the
