@@ -74,3 +74,6 @@ SQI_BREATH_RATIO_REF = 0.1   # 将 breath power ratio 映射到 SQI 的参考值
 # 当 True 时使用新实现的组合平滑器（smoothers.apply_smoothing_chain），否则使用原始中值->Kalman 逻辑
 BREATH_USE_NEW_SMOOTHER = True
 HEART_USE_NEW_SMOOTHER = True
+
+# === 距离标定 ===
+RANGE_HARDWARE_OFFSET_M: float = 0.35  # 雷达天线固有延迟补偿，用卷尺实测后标定
