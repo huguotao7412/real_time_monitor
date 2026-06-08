@@ -84,7 +84,7 @@ class BPTab(QWidget):
         self._last_update_time = time.time()
         self._first_timestamp: float | None = None
 
-        # Trend data caches (max 300 points)
+        # Trend data caches (max 2000 points)
         self._trend_time: list[float] = []
         self._trend_sbp: list[float] = []
         self._trend_dbp: list[float] = []
@@ -199,7 +199,8 @@ class BPTab(QWidget):
             self._trend_dbp.append(r.dbp)
 
             # Keep max 300 points rolling window
-            if len(self._trend_time) > 300:
+            MAX_TREND_POINTS = 2000
+            if len(self._trend_time) > MAX_TREND_POINTS:
                 self._trend_time.pop(0)
                 self._trend_sbp.pop(0)
                 self._trend_dbp.pop(0)

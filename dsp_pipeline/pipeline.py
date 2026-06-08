@@ -212,12 +212,13 @@ class Pipeline:
         self._phase_buffer.append(phase)
         self._frame_count += 1
 
-        if len(self._phase_buffer) < WINDOW_SIZE:
+        MIN_STARTUP_FRAMES = int(FS_HZ * 3.0)
+        if len(self._phase_buffer) < MIN_STARTUP_FRAMES:
             return None
 
         # 4. Choose signal path
         should_update_bpm = (
-            self._frame_count - self._last_bpm_update >= BPM_UPDATE_INTERVAL
+                self._frame_count - self._last_bpm_update >= BPM_UPDATE_INTERVAL
         )
 
         if self._use_beamforming and self._beamforming_ok and rx_complex is not None:

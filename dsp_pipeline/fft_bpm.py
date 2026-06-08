@@ -147,6 +147,8 @@ def estimate_breath_bpm_time_domain(
     if window_len % 2 == 0:
         window_len += 1
     window_len = max(5, min(window_len, n - 1))
+    if window_len % 2 == 0:
+        window_len -= 1
 
     # 得到极为 smooth 且保持纯净呼吸物理轮廓的波形
     smoothed = savgol_filter(detrended, window_length=window_len, polyorder=2)
@@ -259,7 +261,7 @@ def estimate_bpm_stft(
 
     # --- Heart STFT (MATLAB: 25% hamming, 80% overlap) ---
     window_sec = n / fs
-    if window_sec < 15.0:
+    if window_sec < 8.0:
             # 短窗口下，强制 STFT 输出失效，依赖下方的高精度 FFT
             heart_bpm_stft = 0.0
     else:

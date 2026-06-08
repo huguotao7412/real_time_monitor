@@ -34,7 +34,7 @@ PACKET_HEADER_MIN_SIZE = 7  # Magic(4) + MsgId(1) + PacketLen(2) minimum guess
 
 # === DSP 参数 ===
 FS_HZ = 20                # 假设帧率 20 Hz，实际从帧头读取
-WINDOW_DURATION_SEC = 15.0   # 滑动窗口 10 秒
+WINDOW_DURATION_SEC = 10.0   # 滑动窗口 10 秒
 WINDOW_SIZE = int(FS_HZ * WINDOW_DURATION_SEC) # 200 帧
 BPM_UPDATE_INTERVAL = int(FS_HZ * 0.25)   # 每 5 帧更新一次 BPM
 
