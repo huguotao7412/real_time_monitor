@@ -5,6 +5,7 @@ Mode-specific logic (HR vs BP) is delegated to MonitorMode strategy objects.
 
 import time
 import threading
+import copy
 
 import numpy as np
 from PyQt6.QtWidgets import (
@@ -379,48 +380,82 @@ class MainWindow(QMainWindow):
         if not path:
             return
 
-        try:
-            data = self._current_mode.get_export_data()
-            if choice == tr("export_format_csv"):
-                if is_bp:
-                    export_bp_csv(path, data.get("csv_rows", []))
-                else:
+        # 1. 在主线程立即获取数据，并进行深拷贝
+        # 必须拷贝！因为导出 HDF5 可能耗时几秒，此时雷达线程还在疯狂往原数组里塞数据
+        raw_data = self._current_mode.get_export_data()
+        export_data_copy = copy.deepcopy(raw_data)
+
+        # 2. 改变按钮状态，防止用户在导出期间重复点击引发冲突
+        self._save_btn.setEnabled(False)
+        self._save_btn.setText(tr("btn_saving") if tr("btn_saving") != "btn_saving" else "Saving...")
+
+        # 3. 定义后台异步导出任务
+        def export_task():
+            try:
+                data = export_data_copy
+
+                if choice == tr("export_format_csv"):
+                    if is_bp:
+                        export_bp_csv(path, data.get("csv_rows", []))
+                    else:
+                        vitals = data.get("latest_vitals")
+                        breath = vitals.breath_waveform if vitals else np.array([])
+                        heart = vitals.heart_waveform if vitals else np.array([])
+                        export_csv(path, data.get("csv_rows", []), breath, heart)
+
+                elif choice == tr("export_format_hdf5"):
+                    if is_bp:
+                        metadata = {
+                            "device": "RS6240",
+                            "session_duration_s": time.time() - self._start_time if self._start_time > 0 else 0,
+                        }
+                        export_bp_hdf5(path, data.get("csv_rows", []), metadata)
+                    else:
+                        breath_hist = (np.array(data["breath_waveform_accum"])
+                                       if data.get("breath_waveform_accum") else np.array([]))
+                        heart_hist = (np.array(data["heart_waveform_accum"])
+                                      if data.get("heart_waveform_accum") else np.array([]))
+                        metadata = {
+                            "device": "RS6240",
+                            "fs": 20,
+                            "session_duration_s": time.time() - self._start_time if self._start_time > 0 else 0,
+                        }
+                        export_hdf5(path, breath_hist, heart_hist,
+                                    data.get("bpm_history", []),
+                                    data.get("sqi_history", []), metadata)
+
+                elif choice == tr("export_format_edf"):
                     vitals = data.get("latest_vitals")
                     breath = vitals.breath_waveform if vitals else np.array([])
                     heart = vitals.heart_waveform if vitals else np.array([])
-                    export_csv(path, data.get("csv_rows", []), breath, heart)
-            elif choice == tr("export_format_hdf5"):
-                if is_bp:
-                    metadata = {
-                        "device": "RS6240",
-                        "session_duration_s": time.time() - self._start_time if self._start_time > 0 else 0,
-                    }
-                    export_bp_hdf5(path, data.get("csv_rows", []), metadata)
-                else:
-                    breath_hist = (np.array(data["breath_waveform_accum"])
-                                   if data.get("breath_waveform_accum") else np.array([]))
-                    heart_hist = (np.array(data["heart_waveform_accum"])
-                                  if data.get("heart_waveform_accum") else np.array([]))
-                    metadata = {
-                        "device": "RS6240",
-                        "fs": 20,
-                        "session_duration_s": time.time() - self._start_time if self._start_time > 0 else 0,
-                    }
-                    export_hdf5(path, breath_hist, heart_hist,
-                                data.get("bpm_history", []),
-                                data.get("sqi_history", []), metadata)
-            elif choice == tr("export_format_edf"):
-                vitals = data.get("latest_vitals")
-                breath = vitals.breath_waveform if vitals else np.array([])
-                heart = vitals.heart_waveform if vitals else np.array([])
-                export_edf(path, breath, heart, fs=20.0)
-            QMessageBox.information(
-                self, tr("dialog_save_done"), tr("dialog_save_done_msg", path)
-            )
-        except ImportError as e:
-            QMessageBox.critical(self, tr("dialog_error"), str(e))
-        except Exception as e:
-            QMessageBox.critical(self, tr("dialog_error"), str(e))
+                    export_edf(path, breath, heart, fs=20.0)
+
+                # 4. 导出成功，通过单次定时器安全地切回主线程进行弹窗
+                QTimer.singleShot(0, lambda: self._on_save_success(path))
+
+            except Exception as e:
+                # 导出失败，同样切回主线程弹窗报错
+                error_msg = str(e)
+                QTimer.singleShot(0, lambda: self._on_save_error(error_msg))
+
+        # 启动后台守护线程执行保存任务
+        threading.Thread(target=export_task, daemon=True).start()
+
+    # === 新增：线程安全的 UI 恢复回调 ===
+
+    def _on_save_success(self, path: str) -> None:
+        """导出成功后在主线程恢复按钮并弹窗"""
+        self._save_btn.setEnabled(True)
+        self._save_btn.setText(tr("btn_save"))
+        QMessageBox.information(
+            self, tr("dialog_save_done"), tr("dialog_save_done_msg", path)
+        )
+
+    def _on_save_error(self, error_msg: str) -> None:
+        """导出失败后在主线程恢复按钮并报错"""
+        self._save_btn.setEnabled(True)
+        self._save_btn.setText(tr("btn_save"))
+        QMessageBox.critical(self, tr("dialog_error"), error_msg)
 
     # === UI Timer ===
 
