@@ -2,7 +2,7 @@
 
 import numpy as np
 import warnings
-from config.protocol import FS_HZ
+from config.protocol import FS_HZ,FFT_N_HEART,FFT_N_BREATH
 
 
 def estimate_bpm(
@@ -239,7 +239,7 @@ def estimate_bpm_stft(
     breath_signal: np.ndarray,
     heart_signal: np.ndarray,
     fs: float = FS_HZ,
-    n_fft: int = 1024,
+    n_fft: int = FFT_N_HEART,
     raw_displacement: np.ndarray = None,
 ) -> tuple[float, float]:
     """Breath: unbiased autocorrelation + time-domain fallback.
@@ -257,7 +257,7 @@ def estimate_bpm_stft(
 
     if breath_bpm <= 0:
         # 只有时域彻底失败才退回谱估计
-        breath_bpm, _ = estimate_bpm(breath_signal, fs, (0.1, 0.8), n_fft=4096,
+        breath_bpm, _ = estimate_bpm(breath_signal, fs, (0.1, 0.8), n_fft=FFT_N_BREATH,
                                      enable_subharmonic_rescue=True)
 
     # --- Heart STFT (MATLAB: 25% hamming, 80% overlap) ---
@@ -282,7 +282,7 @@ def estimate_bpm_stft(
 
     # FFT fallback for heart: upper bound (MATLAB: 1.0-2.5 Hz)
     f0 = breath_bpm / 60.0 if breath_bpm > 0 else 0.0
-    heart_fft_bpm, _ = estimate_bpm(heart_signal, fs, (0.8, 2.5), f0=f0,n_fft=4096)
+    heart_fft_bpm, _ = estimate_bpm(heart_signal, fs, (0.8, 2.5), f0=f0,n_fft=FFT_N_BREATH)
 
     if heart_bpm_stft > 0 and heart_fft_bpm > 0:
         heart_bpm = min(heart_bpm_stft, heart_fft_bpm)

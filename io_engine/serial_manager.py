@@ -1,7 +1,9 @@
 import threading
 import serial
 import serial.tools.list_ports
-from config.protocol import CONTROL_BAUDRATE, DATA_BAUDRATE
+from config.protocol import ( CONTROL_BAUDRATE, DATA_BAUDRATE,
+                              CONTROL_TIMEOUT_SEC, DATA_TIMEOUT_SEC, DATA_READ_SIZE
+                              )
 
 
 class SerialManager:
@@ -22,7 +24,7 @@ class SerialManager:
         self.control_serial = serial.Serial(
             port=port,
             baudrate=CONTROL_BAUDRATE,
-            timeout=1.0,
+            timeout=CONTROL_TIMEOUT_SEC,
         )
         self.control_port = port
 
@@ -30,7 +32,7 @@ class SerialManager:
         self.data_serial = serial.Serial(
             port=port,
             baudrate=baudrate,
-            timeout=0.5,
+            timeout=DATA_TIMEOUT_SEC,
         )
         self.data_port = port
 
@@ -40,7 +42,7 @@ class SerialManager:
             self.control_serial.write((cmd + "\r\n").encode())
             self.control_serial.flush()
 
-    def read_data(self, size: int = 4096) -> bytes:
+    def read_data(self, size: int = DATA_READ_SIZE) -> bytes:
         """从数据口读取字节"""
         if self.data_serial and self.data_serial.is_open:
             return self.data_serial.read(size)

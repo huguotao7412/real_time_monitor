@@ -12,7 +12,10 @@ from config.protocol import (
     WINDOW_SIZE, FS_HZ, BPM_UPDATE_INTERVAL,
     BREATH_RAW_HISTORY_MAXLEN, BREATH_HISTORY_MAXLEN,
     BREATH_USE_NEW_SMOOTHER, HEART_USE_NEW_SMOOTHER,
-    RANGE_RESOLUTION_M, MIN_VALID_RANGE_BIN, BEAMFORMING_RX_CHANNELS
+    RANGE_RESOLUTION_M, MIN_VALID_RANGE_BIN, BEAMFORMING_RX_CHANNELS,
+    CFAR_ROLLING_BUFFER_SEC, CFAR_INITIAL_SEC, CFAR_RESCAN_SEC, CFAR_SNR_UPDATE_RATIO,
+    DSP_STARTUP_SEC, MUSIC_UPDATE_SEC, EMD_MAX_IMF, FFT_N_BREATH, FFT_N_HEART,
+    SQI_RECENT_SEC, PHASE_RANGE_MIN_NORMAL, BREATH_RATIO_MIN
 )
 from models.radar_frame import RadarFrame
 from dsp_pipeline.vital_signs import VitalSigns
@@ -47,9 +50,9 @@ class Pipeline:
         # 2D-CFAR state (MATLAB adaptive_2d_cfar_findTargetBin)
         self._cfar_accumulator: list[np.ndarray] = []
         self._cfar_state: dict | None = None
-        self._cfar_rolling_buffer: deque[np.ndarray] = deque(maxlen=int(FS_HZ * 2.5))
-        self._cfar_initial_frames: int = int(FS_HZ * 1.0)
-        self._cfar_rescan_interval: int = int(FS_HZ * 5.0)
+        self._cfar_rolling_buffer: deque[np.ndarray] = deque(maxlen=int(FS_HZ * CFAR_ROLLING_BUFFER_SEC))
+        self._cfar_initial_frames: int = int(FS_HZ * CFAR_INITIAL_SEC)
+        self._cfar_rescan_interval: int = int(FS_HZ * CFAR_RESCAN_SEC)
         self._current_bin_snr: float = 0.0
         self.DISTANCE_PER_BIN: float = RANGE_RESOLUTION_M  # RS6240 range resolution
         self._MIN_RANGE_BIN: int = MIN_VALID_RANGE_BIN  # 跳过近场天线耦合杂波 (bins 1-9 ≈ 2.5-22.5cm)
@@ -63,7 +66,7 @@ class Pipeline:
         self._angle_initialized: bool = False
         self._beamforming_ok: bool = True  # set False on failure -> fallback
         self._last_music_update: int = -50
-        self._music_update_interval: int = int(FS_HZ * 2.5)
+        self._music_update_interval: int = int(FS_HZ * MUSIC_UPDATE_SEC)
 
         # MATLAB Filter.m: SOS 滤波器组
         self._filter = VitalSignFilter(fs=FS_HZ)
@@ -176,7 +179,7 @@ class Pipeline:
                 if new_bin is not None:
                     # 修复：当人离开原位置时，旧位置 SNR 为 0.0。
                     # 只要旧位置没信号了，或者新位置信号比旧位置强 1.2 倍，就果断更新距离！
-                    if current_actual_snr == 0.0 or new_snr > current_actual_snr * 1.2:
+                    if current_actual_snr == 0.0 or new_snr > current_actual_snr * CFAR_SNR_UPDATE_RATIO:
                         print(f"[DSP] Target moved! Range updated to bin: {new_bin}")
                         self._best_bin = new_bin
                         self._current_bin_snr = new_snr
@@ -201,7 +204,7 @@ class Pipeline:
         self._phase_buffer.append(phase)
         self._frame_count += 1
 
-        MIN_STARTUP_FRAMES = int(FS_HZ * 3.0)
+        MIN_STARTUP_FRAMES = int(FS_HZ * DSP_STARTUP_SEC)
         if len(self._phase_buffer) < MIN_STARTUP_FRAMES:
             return None
 
@@ -354,7 +357,7 @@ class Pipeline:
         from dsp_pipeline.wpd_filter import wpd_separate
         try:
             # 清除 displacement 中的呼吸谐波后再提取心率
-            clean_disp = emd_harmonic_clean(filted, FS_HZ, max_imf=4)
+            clean_disp = emd_harmonic_clean(filted, FS_HZ, max_imf=EMD_MAX_IMF)
             heart_diff = np.diff(clean_disp)
             _, heart_wave = wpd_separate(
                 clean_disp, FS_HZ, heart_input_signal=heart_diff
@@ -367,11 +370,11 @@ class Pipeline:
         # BPM estimation: FFT breath + STFT heart (MATLAB PhaseProcess port)
         try:
             breath_bpm, heart_bpm = estimate_bpm_stft(
-                breath_wave, heart_wave, FS_HZ,1024, raw_displacement=displacement
+                breath_wave, heart_wave, FS_HZ,FFT_N_HEART, raw_displacement=displacement
             )
         except Exception:
             breath_bpm, _ = estimate_bpm(
-                breath_wave, FS_HZ, (0.1, 0.8), n_fft=4096,
+                breath_wave, FS_HZ, (0.1, 0.8), n_fft=FFT_N_BREATH,
                 enable_subharmonic_rescue=True,
             )
             if breath_bpm <= 0:
@@ -404,7 +407,7 @@ class Pipeline:
         breath_power_ratio = breath_energy / total_energy
 
         # 提取最近 30 帧 (1.5秒) 短时能量，避免 10 秒窗口导致的响应迟钝
-        recent_frames = int(FS_HZ * 1.5)
+        recent_frames = int(FS_HZ * SQI_RECENT_SEC)
         if len(no_dc) >= recent_frames:
             recent_no_dc = no_dc[-recent_frames:]
             recent_phase_range = float(np.max(recent_no_dc) - np.min(recent_no_dc))
@@ -412,14 +415,14 @@ class Pipeline:
             recent_phase_range = phase_range
 
         # 弱信号检测 → Range Bin 重捕获
-        in_low_signal = (recent_phase_range < 0.005)
+        in_low_signal = (recent_phase_range < PHASE_RANGE_MIN_NORMAL)
 
         if in_low_signal:
             self._low_signal_frame_count += 1
         else:
             self._low_signal_frame_count = 0
 
-        if self._low_signal_frame_count >= int(FS_HZ * 1.5) and self._best_bin is not None:
+        if self._low_signal_frame_count >= int(FS_HZ * SQI_RECENT_SEC) and self._best_bin is not None:
             print("[DSP] Target lost! Resetting buffers...")
             self._best_bin = None
             self._phase_buffer.clear()
@@ -481,7 +484,7 @@ class Pipeline:
                 )
                 if breath_bpm <= 0:
                     breath_bpm, _ = estimate_bpm(
-                        breath_signal, FS_HZ, (0.1, 0.8), n_fft=1024,
+                        breath_signal, FS_HZ, (0.1, 0.8), n_fft=FFT_N_HEART,
                         enable_subharmonic_rescue=True,
                     )
                 if breath_bpm > 0:
@@ -547,7 +550,7 @@ class Pipeline:
         from scipy.signal import welch
         phase_range = float(np.max(signal) - np.min(signal))
 
-        if phase_range < 0.005:
+        if phase_range < PHASE_RANGE_MIN_NORMAL:
             return {"valid": False, "reason": f"phase_range={phase_range:.4f}"}
 
         freqs, psd = welch(signal, fs=FS_HZ, nperseg=min(128, len(signal)))
@@ -555,7 +558,7 @@ class Pipeline:
         total_power = np.sum(psd) + 1e-10
         breath_ratio = np.sum(psd[breath_mask]) / total_power
 
-        if breath_ratio < 0.03:
+        if breath_ratio < BREATH_RATIO_MIN:
             return {"valid": False, "reason": f"breath_ratio={breath_ratio:.3f}"}
 
         return {"valid": True, "phase_range": phase_range, "breath_ratio": breath_ratio}

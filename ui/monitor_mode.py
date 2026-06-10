@@ -9,7 +9,7 @@ from datetime import datetime
 
 import numpy as np
 
-from config.protocol import UI_REFRESH_MS, RANGE_HARDWARE_OFFSET_M
+from config.protocol import UI_REFRESH_MS, RANGE_HARDWARE_OFFSET_M, MIN_REAL_DISTANCE_M
 from config.i18n import tr
 from models.radar_frame import RadarFrame, FrameHeader
 from dsp_pipeline.vital_signs import VitalSigns
@@ -174,7 +174,7 @@ class HRMode(MonitorMode):
         best_bin = self._pipeline.best_range_bin
         if best_bin is not None and best_bin > 0:
             target_distance_m = (best_bin * 0.039) - RANGE_HARDWARE_OFFSET_M
-            target_distance_m = max(0.01, target_distance_m)
+            target_distance_m = max(MIN_REAL_DISTANCE_M, target_distance_m)
         else:
             target_distance_m = 0.0
 

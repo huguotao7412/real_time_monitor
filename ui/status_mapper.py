@@ -7,6 +7,8 @@ import numpy as np
 
 from config.i18n import tr
 
+from config.protocol import BREATH_RATIO_MIN, PHASE_RANGE_MIN_NORMAL
+
 
 def map_status(quality: dict[str, Any] | None) -> tuple[str, str]:
     """Return (message: str, level: str) where level is 'normal'|'warning'|'error'.
@@ -31,9 +33,9 @@ def map_status(quality: dict[str, Any] | None) -> tuple[str, str]:
         return (tr("msg_signal_severe_degraded"), "error")
 
     # Warning thresholds: degraded but still usable
-    if phase_range < 0.005:
+    if phase_range < PHASE_RANGE_MIN_NORMAL:
         return (tr("msg_no_micro_motion"), "warning")
-    if breath_ratio < 0.03:
+    if breath_ratio < BREATH_RATIO_MIN:
         return (tr("msg_signal_weak"), "warning")
 
     return (tr("status_monitoring"), "normal")

@@ -28,8 +28,12 @@ from collections import deque
 import numpy as np
 from scipy.signal import resample_poly
 
-from config.protocol import RAW_QUEUE_MAXSIZE, DISPLAY_QUEUE_MAXSIZE, RANGE_HARDWARE_OFFSET_M
-from config.protocol import RADAR_BP_FPS, DSP_BP_TARGET_FS,RANGE_RESOLUTION_M
+from config.protocol import (RAW_QUEUE_MAXSIZE, DISPLAY_QUEUE_MAXSIZE, RANGE_HARDWARE_OFFSET_M,
+                              RADAR_BP_FPS, DSP_BP_TARGET_FS,RANGE_RESOLUTION_M,
+                              BP_BATCH_SEC, BP_STEP_SEC, BP_NETWORK_INPUT_LEN,
+                              BP_CFAR_INITIAL_FRAMES, BP_CFAR_INTERVAL, BP_CFAR_FALLBACK_FRAMES, BP_COLD_START_FRAMES,
+                              FREQ_SCALE_60G_TO_24G, PHASE_RANGE_MIN_BP, BP_MAX_BAD_SIGNAL_COUNT, MIN_REAL_DISTANCE_M
+                             )
 from models.radar_frame import RadarFrame
 from bp_monitor.bp_models import BPResult
 from bp_monitor.bp_cfar import find_target_bins_1d, adaptive_2d_cfar
@@ -51,13 +55,13 @@ class BPPipeline:
     FS_TARGET = float(DSP_BP_TARGET_FS)
 
     # 物理时间联动：原来的 1024 是基于 5.12 秒 * 200Hz 得来的
-    MAX_FRAMES = int(5.12 * FS)
+    MAX_FRAMES = int(BP_BATCH_SEC * FS)
 
     # 神经网络固定输入维度 (这个不随采样率变化，是由 bp_weights.mat 模型决定的)
-    N_INPUT = 256
+    N_INPUT = BP_NETWORK_INPUT_LEN
 
     # 滑动窗口步长：原来的 100 是基于 0.5 秒 * 200Hz 得来的
-    STEP_FRAMES = int(0.5 * FS)
+    STEP_FRAMES = int(BP_STEP_SEC * FS)
 
     # 距离分辨率：直接引用配置文件的全局变量
     DISTANCE_PER_BIN = RANGE_RESOLUTION_M
@@ -145,7 +149,7 @@ class BPPipeline:
         # ---- Phase 1: CFAR lock ----
         if self._target_bin is None:
             # Try CFAR every 16 frames starting from 64 frames
-            if n >= 64 and n % 16 == 0:
+            if n >= BP_CFAR_INITIAL_FRAMES and n % BP_CFAR_INTERVAL == 0:
                 acc = current_data
                 acc_bg = acc - np.mean(acc, axis=1, keepdims=True)
                 candidates = find_target_bins_1d(
@@ -153,17 +157,17 @@ class BPPipeline:
                 )
                 if len(candidates) > 0:
                     self._target_bin = int(candidates[0])
-                    real_dist = max(0.01, self._target_bin * self.DISTANCE_PER_BIN - RANGE_HARDWARE_OFFSET_M)
+                    real_dist = max(MIN_REAL_DISTANCE_M, self._target_bin * self.DISTANCE_PER_BIN - RANGE_HARDWARE_OFFSET_M)
                     print(f"[BPPipeline] Target locked: bin={self._target_bin} ({real_dist:.2f}m)")
 
             # Fallback after 256 frames: pick strongest bin
-            if self._target_bin is None and n >= 256:
+            if self._target_bin is None and n >= BP_CFAR_FALLBACK_FRAMES:
                 acc = current_data
                 acc_bg = acc - np.mean(acc, axis=1, keepdims=True)
                 energy = np.mean(np.abs(acc_bg), axis=(1, 2))
                 energy[:2] = 0  # skip near-field DC
                 self._target_bin = int(np.argmax(energy))
-                real_dist = max(0.01, self._target_bin * self.DISTANCE_PER_BIN - RANGE_HARDWARE_OFFSET_M)
+                real_dist = max(MIN_REAL_DISTANCE_M, self._target_bin * self.DISTANCE_PER_BIN - RANGE_HARDWARE_OFFSET_M)
                 print(f"[BPPipeline] Fallback lock: bin={self._target_bin} ({real_dist:.2f}m)")
 
             if self._target_bin is None:
@@ -171,7 +175,7 @@ class BPPipeline:
 
         # ---- Phase 2: Wait for full batch ----
         is_cold_start = (self._sbp_ema is None)
-        required_frames = 512 if is_cold_start else self.MAX_FRAMES
+        required_frames = BP_COLD_START_FRAMES if is_cold_start else self.MAX_FRAMES
         if self._valid_frames < required_frames:
             return
 
@@ -218,11 +222,11 @@ class BPPipeline:
         unwrapped = unwrapped.squeeze()
 
         # ---- Step 4: Frequency scaling ----
-        unwrapped_scaled = unwrapped * (24.0 / 60.0)
+        unwrapped_scaled = unwrapped * FREQ_SCALE_60G_TO_24G
 
         # ---- Step 4b: Low-signal detection → re-acquire ----
         phase_range = float(np.max(unwrapped_scaled) - np.min(unwrapped_scaled))
-        if phase_range < 0.001:
+        if phase_range < PHASE_RANGE_MIN_BP:
             print("[BPPipeline] Low signal, re-acquiring target...")
             self._target_bin = None
             self._valid_frames = 0  # 替代 self._complex_buffer.clear()
@@ -253,7 +257,7 @@ class BPPipeline:
         else:
             self._bad_signal_count = 0
 
-        if self._bad_signal_count >= 4:
+        if self._bad_signal_count >= BP_MAX_BAD_SIGNAL_COUNT:
             print("[BPPipeline] Target lost or moved! Forcing re-acquire...")
             self._target_bin = None
             self._cfar_state = None
@@ -288,7 +292,7 @@ class BPPipeline:
 
         # ---- Step 10: Push result ----
         raw_distance = target_bin * self.DISTANCE_PER_BIN
-        real_distance = max(0.01, raw_distance - RANGE_HARDWARE_OFFSET_M)
+        real_distance = max(MIN_REAL_DISTANCE_M, raw_distance - RANGE_HARDWARE_OFFSET_M)
         result = BPResult(
             timestamp=time.time(),
             frame_index=self._frame_count,

@@ -37,7 +37,7 @@ FFT_BIN_DTYPE = "<i2"               # Little-endian int16 per component
 # 2. 科研变频与采样率核心配置 (Sampling Rates & FPS)
 # ==============================================================================
 # 【核心控制点】做变频实验只需修改这里的 FPS，雷达硬件指令和所有上层 DSP 管道会自动对齐！
-RADAR_NORMAL_FPS = 20               # 常规模式(呼吸/心率)雷达硬件帧率 (Hz)
+RADAR_NORMAL_FPS = 50               # 常规模式(呼吸/心率)雷达硬件帧率 (Hz)
 RADAR_BP_FPS = 200                  # 血压模式高频雷达硬件帧率 (Hz)
 
 # DSP 信号处理管线真实采样率
@@ -124,3 +124,49 @@ TCP_DEFAULT_PORT = 9000
 RAW_QUEUE_MAXSIZE = 1024
 DISPLAY_QUEUE_MAXSIZE = 64
 UI_REFRESH_MS = 33                  # 前端 UI 刷新间隔 (~30 FPS)
+
+# ==============================================================================
+# 6. 算法参数与阈值配置 (Algorithm Parameters & Thresholds)
+# ==============================================================================
+# 物理距离保护
+MIN_REAL_DISTANCE_M = 0.01          # 有效物理距离最小限制 (m)，避免近场天线盲区负值
+
+# 串口通信配置
+CONTROL_TIMEOUT_SEC = 1.0           # 控制串口超时时间 (秒)
+DATA_TIMEOUT_SEC = 0.5              # 数据串口超时时间 (秒)
+DATA_READ_SIZE = 4096               # 数据串口单次读取最大字节数
+
+# ---------------------------------------------------------
+# [常规监测模式] DSP Pipeline 实验参数
+# ---------------------------------------------------------
+CFAR_ROLLING_BUFFER_SEC = 2.5       # 2D-CFAR 滚动窗口长度 (秒)
+CFAR_INITIAL_SEC = 1.0              # 初始目标锁定的累积时长 (秒)
+CFAR_RESCAN_SEC = 5.0               # 重新扫描检测目标的间隔 (秒)
+CFAR_SNR_UPDATE_RATIO = 1.2         # 目标更新判定：新位置SNR需高于旧位置的倍率
+
+DSP_STARTUP_SEC = 3.0               # DSP 启动允许输出所需的最少数据长度 (秒)
+MUSIC_UPDATE_SEC = 2.5              # MUSIC 波束成形测角更新频率 (秒)
+EMD_MAX_IMF = 4                     # EMD 分解最大层数 (控制降噪深度)
+
+FFT_N_BREATH = 4096                 # 呼吸高精度 FFT 窗长
+FFT_N_HEART = 1024                  # 心跳 STFT/FFT 窗长 (分辨率与实时性的折中)
+SQI_RECENT_SEC = 1.5                # 短时 SQI 能量与弱信号判定窗口 (秒)
+
+PHASE_RANGE_MIN_NORMAL = 0.005      # 常规模式最小有效相位极差 (低于此值判定为无人/弱信号)
+BREATH_RATIO_MIN = 0.03             # 呼吸能量占比极小阈值 (判定信号有效性)
+
+# ---------------------------------------------------------
+# [血压监测模式] BP Pipeline 实验参数
+# ---------------------------------------------------------
+BP_BATCH_SEC = 5.12                 # 血压网络计算的数据切片总时长 (秒)
+BP_STEP_SEC = 0.5                   # 血压网络滑窗步进时长 (秒)
+BP_NETWORK_INPUT_LEN = 256          # 血压网络定长输入特征维度 (不得随意更改)
+
+BP_CFAR_INITIAL_FRAMES = 64         # 首次尝试 1D CFAR 的累积帧数
+BP_CFAR_INTERVAL = 16               # 1D CFAR 失败后的重试间隔帧数
+BP_CFAR_FALLBACK_FRAMES = 256       # CFAR 完全失败后直接取能量最大 Bin 的帧数
+BP_COLD_START_FRAMES = 512          # 首次冷启动运行网络的最低要求帧数
+
+FREQ_SCALE_60G_TO_24G = 24.0 / 60.0 # 60GHz 雷达到 24GHz 的相位折算系数 (适配现有网络)
+PHASE_RANGE_MIN_BP = 0.001          # 血压模式最小有效相位极差 (高频信号更微弱)
+BP_MAX_BAD_SIGNAL_COUNT = 4         # 连续异常血压输出的最大容忍次数，超过则强制重捕获
