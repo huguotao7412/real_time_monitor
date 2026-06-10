@@ -1,9 +1,9 @@
 # RS6240 Radar Vital Signs Real-Time Monitor
 
 **RS6240 mmWave radar-based real-time vital signs monitoring system.**
-Heart rate / breath rate monitoring (HR mode) and blood pressure estimation (BP mode) in one tool.
+An integrated research platform for heart rate / breath rate monitoring (HR mode) and blood pressure estimation (BP mode), featuring a Single Source of Truth (SSOT) configuration architecture for seamless experimental tuning.
 
-**基于 RS6240 毫米波雷达的实时生命体征监测系统。** 心率/呼吸监测（HR 模式）和血压估算（BP 模式）一体化工具。
+**基于 RS6240 毫米波雷达的实时生命体征监测系统。** 集成心率/呼吸监测（HR 模式）与血压估算（BP 模式）的研究型平台，采用“单一事实来源（SSOT）”配置架构，专为科研调参和算法迭代设计。
 
 ---
 
@@ -11,31 +11,29 @@ Heart rate / breath rate monitoring (HR mode) and blood pressure estimation (BP 
 
 | Feature | Description |
 |---------|-------------|
-| **HR Mode** | Breath rate + heart rate from chest displacement. 2T4R antenna, MUSIC beamforming + LCMV, WPD separation, real-time waveform display |
-| **BP Mode** | SBP/DBP estimation from pulse waveform. 1T1R antenna, 200Hz sampling, 2D-CFAR + EMD + wavelet denoising + neural network inference |
-| **Mode Hot-Swap** | Switch HR ↔ BP while monitoring (serial mode) without restarting application |
-| **Subject-Friendly UI** | Breathing petal animation, pulsing heart icon, calming dark theme |
-| **Research View** | Dual waveforms with axes, trend panel, SQI indicator, collapsible debug output |
-| **Data Export** | CSV, HDF5, EDF export for post-hoc analysis |
-| **Replay Mode** | Offline replay from `.bin` files for algorithm development and debugging |
-| **i18n** | English / 中文 language switch in menu bar |
+| **HR Mode** | Breath rate + heart rate from chest displacement. 2T4R antenna, MUSIC beamforming + LCMV, EMD harmonic removal, real-time waveform display. |
+| **BP Mode** | SBP/DBP estimation from pulse waveform. 1T1R antenna, 200Hz high-frequency sampling, 2D-CFAR + EMD + wavelet denoising + neural network inference. |
+| **Mode Hot-Swap** | Switch HR ↔ BP while monitoring (serial mode) without restarting application. Hardware commands sync automatically. |
+| **Subject-Friendly UI** | Breathing petal animation, pulsing heart icon, calming dark theme. |
+| **Research View** | Dual waveforms with axes, trend panel, SQI indicator, collapsible debug output (Phase range, breath ratio). |
+| **Data Export** | CSV, HDF5, EDF export for post-hoc analysis. |
+| **i18n** | English / 中文 language switch in menu bar. |
 
 | 功能 | 说明 |
 |------|------|
-| **心率模式** | 胸腔位移提取呼吸率 + 心率。2T4R 天线，MUSIC 波束成形 + LCMV，WPD 分离，实时波形显示 |
-| **血压模式** | 脉搏波形估算 SBP/DBP。1T1R 天线，200Hz 采样，2D-CFAR + EMD + 小波去噪 + 神经网络推理 |
-| **模式热切换** | 监测中直接切换 HR ↔ BP（串口模式），无需重启程序 |
+| **心率模式** | 胸腔位移提取呼吸率 + 心率。2T4R 天线，MUSIC 波束成形 + LCMV，EMD 谐波滤除，实时波形显示 |
+| **血压模式** | 脉搏波形估算 SBP/DBP。1T1R 天线，200Hz 高频采样，2D-CFAR + EMD + 小波去噪 + 神经网络推理 |
+| **模式热切换** | 监测中直接切换 HR ↔ BP（串口模式），无需重启程序，雷达底层指令自动重配 |
 | **受检者界面** | 呼吸花瓣动画、心跳图标、暗色主题，适合被监测者观看 |
-| **研究界面** | 双波形带坐标轴、趋势图、SQI 信号质量、可折叠调试面板 |
+| **研究界面** | 双波形带坐标轴、趋势图、SQI 信号质量、可折叠调试面板（极差、能量占比） |
 | **数据导出** | 支持 CSV / HDF5 / EDF 格式导出 |
-| **回放模式** | 离线播放 `.bin` 文件，适用于算法开发和调试 |
 | **国际化** | 菜单栏一键切换英文 / 中文 |
 
 ---
 
 ## System Requirements / 系统要求
 
-- **Python** 3.10+
+- **Python** 3.10+ (Tested on 3.12.x)
 - **OS** Windows 10/11 (primary), Linux/macOS (untested)
 - **Hardware** RS6240 mmWave radar module + dual USB-UART (Standard + Enhanced COM ports)
 - **MATLAB weights file** `bp_matlab/bp_weights.mat` (required for BP mode only)
@@ -79,25 +77,10 @@ PyEMD>=1.0         # Empirical Mode Decomposition
 
 ## Quick Start / 快速开始
 
-### 1. Offline Replay / 离线回放 (HR mode)
+###  Serial Live Capture / 串口实时采集
 
 ```bash
-python main.py -r data/your_file.bin
-```
-
-The application picks the latest `.bin` in `data/` automatically if no file is given.
-如果未指定文件，自动选择 `data/` 目录下最新的 `.bin` 文件。
-
-### 2. Offline Replay / 离线回放 (BP mode)
-
-```bash
-python main.py -r data/your_file.bin --bp
-```
-
-### 3. Serial Live Capture / 串口实时采集
-
-```bash
-python main.py -s
+python main.py 
 ```
 
 Requires RS6240 radar connected via dual USB-UART (Standard + Enhanced COM ports).
@@ -117,7 +100,7 @@ Start monitoring, then click the purple mode button to switch HR ↔ BP on the f
 │  Menu Bar: Language | 菜单栏：语言切换              │
 ├──────────────────────────────────────────────────┤
 │  Title: App Name | File Selector (replay mode)    │
-│  标题：应用名称 | 文件选择（回放模式）                 │
+│  标题：应用名称 |                  │
 ├──────┬───────────────────────────────────────────┤
 │      │  Tab 1: Subject / 受检者                   │
 │      │  Tab 2: BP / 血压                         │
@@ -280,18 +263,18 @@ real_time_monitor/
 
 Key parameters in `config/protocol.py`:
 
-| Parameter | Value | Description |
-|-----------|-------|-------------|
-| `FS_HZ` | 20 | HR mode frame rate (Hz) |
-| `WINDOW_SIZE` | 200 | Sliding window (10s @ 20Hz) |
-| `BPM_UPDATE_INTERVAL` | 5 | BPM recalc every N frames |
-| `UI_REFRESH_MS` | 33 | Display update interval (~30fps) |
-| `RAW_QUEUE_MAXSIZE` | 64 | Pipeline input queue capacity |
-| `DISPLAY_QUEUE_MAXSIZE` | 16 | Pipeline output queue capacity |
+| Parameter | Value      | Description |
+|-----------|------------|-------------|
+| `FS_HZ` | 50         | HR mode frame rate (Hz) |
+| `WINDOW_SIZE` | 200        | Sliding window (10s @ 20Hz) |
+| `BPM_UPDATE_INTERVAL` | 5          | BPM recalc every N frames |
+| `UI_REFRESH_MS` | 33         | Display update interval (~30fps) |
+| `RAW_QUEUE_MAXSIZE` | 64         | Pipeline input queue capacity |
+| `DISPLAY_QUEUE_MAXSIZE` | 16         | Pipeline output queue capacity |
 | `BREATH_BAND` | (0.1, 0.6) | Breath frequency range (Hz) |
 | `HEART_BAND` | (0.8, 2.5) | Heart rate frequency range (Hz) |
-| `CONTROL_BAUDRATE` | 115200 | Control COM baud rate |
-| `DATA_BAUDRATE` | 1000000 | Data COM baud rate |
+| `CONTROL_BAUDRATE` | 115200     | Control COM baud rate |
+| `DATA_BAUDRATE` | 1000000    | Data COM baud rate |
 
 ---
 
