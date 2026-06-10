@@ -4,28 +4,8 @@ import threading
 import time
 import queue
 from collections import deque
+from scipy.signal import sosfiltfilt, savgol_filter
 import numpy as np
-
-# Safe import of scipy.signal functions with lightweight fallbacks if SciPy is not available
-try:
-    from scipy.signal import sosfiltfilt, savgol_filter
-except Exception:
-    # Fallbacks: keep pipeline running even if SciPy isn't installed
-    def _sosfiltfilt_passthrough(sos, x):
-        return x
-    sosfiltfilt = _sosfiltfilt_passthrough
-
-    def savgol_filter(x, window_length=9, polyorder=3, deriv=0):
-        import numpy as _np
-        # Basic moving-average fallback for smoothing, gradient for derivative
-        if window_length < 3:
-            window_length = 3
-        if deriv == 0:
-            w = _np.ones(window_length) / float(window_length)
-            return _np.convolve(x, w, mode='same')
-        else:
-            sm = _np.convolve(x, _np.ones(window_length) / float(window_length), mode='same')
-            return _np.gradient(sm)
 
 from config.protocol import (
     RAW_QUEUE_MAXSIZE, DISPLAY_QUEUE_MAXSIZE,

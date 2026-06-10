@@ -380,19 +380,18 @@ class MainWindow(QMainWindow):
         if not path:
             return
 
-        # 1. 在主线程立即获取数据，并进行深拷贝
-        # 必须拷贝！因为导出 HDF5 可能耗时几秒，此时雷达线程还在疯狂往原数组里塞数据
-        raw_data = self._current_mode.get_export_data()
-        export_data_copy = copy.deepcopy(raw_data)
 
-        # 2. 改变按钮状态，防止用户在导出期间重复点击引发冲突
+
+
         self._save_btn.setEnabled(False)
         self._save_btn.setText(tr("btn_saving") if tr("btn_saving") != "btn_saving" else "Saving...")
 
         # 3. 定义后台异步导出任务
         def export_task():
             try:
-                data = export_data_copy
+                raw_data = self._current_mode.get_export_data()
+                import copy
+                data = copy.deepcopy(raw_data)  # 耗时操作放在子线程
 
                 if choice == tr("export_format_csv"):
                     if is_bp:
