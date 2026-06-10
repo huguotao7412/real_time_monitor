@@ -29,6 +29,7 @@ import numpy as np
 from scipy.signal import resample_poly
 
 from config.protocol import RAW_QUEUE_MAXSIZE, DISPLAY_QUEUE_MAXSIZE, RANGE_HARDWARE_OFFSET_M
+from config.protocol import RADAR_BP_FPS, DSP_BP_TARGET_FS,RANGE_RESOLUTION_M
 from models.radar_frame import RadarFrame
 from bp_monitor.bp_models import BPResult
 from bp_monitor.bp_cfar import find_target_bins_1d, adaptive_2d_cfar
@@ -46,12 +47,20 @@ class BPPipeline:
     network inference → SBP/DBP.
     """
 
-    MAX_FRAMES = 1024
-    FS = 200.0
-    FS_TARGET = 50.0
+    FS = float(RADAR_BP_FPS)
+    FS_TARGET = float(DSP_BP_TARGET_FS)
+
+    # 物理时间联动：原来的 1024 是基于 5.12 秒 * 200Hz 得来的
+    MAX_FRAMES = int(5.12 * FS)
+
+    # 神经网络固定输入维度 (这个不随采样率变化，是由 bp_weights.mat 模型决定的)
     N_INPUT = 256
-    STEP_FRAMES = 100   # sliding window step (~0.5 s at 200 Hz)
-    DISTANCE_PER_BIN = 0.039
+
+    # 滑动窗口步长：原来的 100 是基于 0.5 秒 * 200Hz 得来的
+    STEP_FRAMES = int(0.5 * FS)
+
+    # 距离分辨率：直接引用配置文件的全局变量
+    DISTANCE_PER_BIN = RANGE_RESOLUTION_M
 
     def __init__(self, weights_path: str = "bp_matlab/bp_weights.mat"):
         self.raw_queue: queue.Queue[RadarFrame] = queue.Queue(maxsize=RAW_QUEUE_MAXSIZE)
@@ -220,7 +229,9 @@ class BPPipeline:
             return
 
         # ---- Step 5: Downsample 200→50Hz ----
-        wave_50hz_raw = resample_poly(unwrapped_scaled, up=50, down=200)
+        wave_50hz_raw = resample_poly(unwrapped_scaled,
+                                      up=int(self.FS_TARGET),
+                                      down=int(self.FS))
 
         # ---- Step 6: Signal cleaning at 50Hz ----
         clean = clean_pulse_wave(wave_50hz_raw, fs=self.FS_TARGET)

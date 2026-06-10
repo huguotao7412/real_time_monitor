@@ -5,6 +5,7 @@ SOS 级联比单次 butter+filtfilt 更稳定，不易出现数值溢出。
 
 import numpy as np
 from scipy.signal import butter, sosfiltfilt
+from config.protocol import FS_HZ
 
 
 class VitalSignFilter:
@@ -34,20 +35,20 @@ class VitalSignFilter:
 
 
 # 保留旧接口兼容
-def remove_dc(signal: np.ndarray, window: int = 200) -> np.ndarray:
+def remove_dc(signal: np.ndarray, window: int = 200,fs: float = FS_HZ) -> np.ndarray:
     """Remove DC component via zero-phase high-pass filter.
 
     Uses 2nd-order Butterworth high-pass at 0.05 Hz with forward-backward
     filtering to eliminate window-edge artifacts that a simple mean subtraction
     would introduce.
     """
-    from scipy.signal import filtfilt
+    from scipy.signal import filtfilt, butter
 
-    b, a = butter(2, 0.05 / (20.0 / 2), btype='high')
+    b, a = butter(2, 0.05 / (fs / 2), btype='high')
     return filtfilt(b, a, signal)
 
 
-def butter_bandpass(signal, lowcut, highcut, fs=20.0, order=4):
+def butter_bandpass(signal, lowcut, highcut, fs=FS_HZ, order=4):
     """单次 butter (向后兼容)"""
     nyq = 0.5 * fs
     b, a = butter(order, [lowcut / nyq, highcut / nyq], btype="band")

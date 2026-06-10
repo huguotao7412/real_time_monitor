@@ -2,6 +2,7 @@
 
 import numpy as np
 import warnings
+from config.protocol import FS_HZ
 
 
 def estimate_bpm(
@@ -120,7 +121,7 @@ def estimate_bpm(
 
 def estimate_breath_bpm_time_domain(
         signal: np.ndarray,
-        fs: float = 20.0,
+        fs: float = FS_HZ,
         min_interval_sec: float = 1.0,
 ) -> float:
     """
@@ -227,7 +228,7 @@ def kalman_smooth(
 
 
 # 向后兼容
-def fft_peak_to_bpm(signal, fs=20.0, valid_band=(0.1, 3.0)):
+def fft_peak_to_bpm(signal, fs=FS_HZ, valid_band=(0.1, 3.0)):
     bpm, _ = estimate_bpm(signal, fs, valid_band)
     return bpm
 
@@ -237,7 +238,7 @@ def fft_peak_to_bpm(signal, fs=20.0, valid_band=(0.1, 3.0)):
 def estimate_bpm_stft(
     breath_signal: np.ndarray,
     heart_signal: np.ndarray,
-    fs: float = 20.0,
+    fs: float = FS_HZ,
     n_fft: int = 1024,
     raw_displacement: np.ndarray = None,
 ) -> tuple[float, float]:
