@@ -195,15 +195,22 @@ class Pipeline:
                     # 修复：当人离开原位置时，旧位置 SNR 为 0.0。
                     # 只要旧位置没信号了，或者新位置信号比旧位置强 1.2 倍，就果断更新距离！
                     if current_actual_snr == 0.0 or new_snr > current_actual_snr * 1.2:
+                        print(f"[DSP] Target moved! Range updated to bin: {new_bin}")
                         self._best_bin = new_bin
                         self._current_bin_snr = new_snr
-                        print(f"[DSP] Target moved! Range updated to bin: {self._best_bin}")
+                        self._phase_buffer.clear()
+                        self._rx_buffer.clear()
+                        self._last_unwrapped_phase = None
+
 
         # 2. Extract per-RX complex data and buffer
         rx_complex = None
         try:
             rx_complex = self._extract_rx_complex(data_cube)
+            phase = extract_phase(data_cube, self._best_bin)
+
             self._rx_buffer.append(rx_complex)
+            self._phase_buffer.append(phase)
         except (IndexError, ValueError):
             pass
 
@@ -431,7 +438,12 @@ class Pipeline:
             self._low_signal_frame_count = 0
 
         if self._low_signal_frame_count >= int(FS_HZ * 1.5) and self._best_bin is not None:
+            print("[DSP] Target lost! Resetting buffers...")
             self._best_bin = None
+            self._phase_buffer.clear()
+            self._rx_buffer.clear()
+            self._last_unwrapped_phase = None
+            self._low_signal_frame_count = 0
 
         # BPM 估计
         breath_bpm = self._last_valid_breath_bpm

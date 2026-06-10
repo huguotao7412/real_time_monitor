@@ -64,7 +64,8 @@ class BPPipeline:
         self._stop_event = threading.Event()
 
         # Internal state
-        self._complex_buffer: list[np.ndarray] = []  # list of [32, 1, 1] complex arrays
+        self._buffer = np.zeros((32, self.MAX_FRAMES, 1), dtype=complex)
+        self._valid_frames = 0  # list of [32, 1, 1] complex arrays
         self._frame_count = 0
         self._target_bin: int | None = None
         self._cfar_state: dict | None = None   # persistent CFAR state (adaptive beta)
@@ -110,21 +111,33 @@ class BPPipeline:
                 traceback.print_exc()
 
     def _process_frame(self, frame: RadarFrame) -> None:
-        """Accumulate complex frames, process batch when 1024 frames collected.
-
-        Strictly follows MATLAB main.m while-loop."""
         data_cube = frame.data_cube  # [32, 1, 1] = [bins, doppler=1, rx=1]
 
-        # Always accumulate complex frame FIRST
-        self._complex_buffer.append(data_cube.copy())
+        # ==========================================
+        # 1. 数组环形存入逻辑（替代 list.append）
+        # ==========================================
+        if self._valid_frames < self.MAX_FRAMES:
+            # 填满初始阶段
+            self._buffer[:, self._valid_frames:self._valid_frames + 1, :] = data_cube
+            self._valid_frames += 1
+        else:
+            # 队列满后，整体左移 (利用切片赋值替代频繁的内存分配)
+            self._buffer[:, :-1, :] = self._buffer[:, 1:, :]
+            self._buffer[:, -1:, :] = data_cube
+
         self._frame_count += 1
+
+        # ==========================================
+        # 2. 获取当前有效数据（零拷贝/引用，替代 np.concatenate）
+        # ==========================================
+        current_data = self._buffer[:, :self._valid_frames, :]
+        n = self._valid_frames  # 替代 len(self._complex_buffer)
 
         # ---- Phase 1: CFAR lock ----
         if self._target_bin is None:
-            n = len(self._complex_buffer)
             # Try CFAR every 16 frames starting from 64 frames
             if n >= 64 and n % 16 == 0:
-                acc = np.concatenate(self._complex_buffer, axis=1)  # [32, N, 1]
+                acc = current_data
                 acc_bg = acc - np.mean(acc, axis=1, keepdims=True)
                 candidates = find_target_bins_1d(
                     acc_bg, self.DISTANCE_PER_BIN, num_targets=1
@@ -133,42 +146,44 @@ class BPPipeline:
                     self._target_bin = int(candidates[0])
                     real_dist = max(0.01, self._target_bin * self.DISTANCE_PER_BIN - RANGE_HARDWARE_OFFSET_M)
                     print(f"[BPPipeline] Target locked: bin={self._target_bin} ({real_dist:.2f}m)")
+
             # Fallback after 256 frames: pick strongest bin
             if self._target_bin is None and n >= 256:
-                acc = np.concatenate(self._complex_buffer, axis=1)
+                acc = current_data
                 acc_bg = acc - np.mean(acc, axis=1, keepdims=True)
                 energy = np.mean(np.abs(acc_bg), axis=(1, 2))
                 energy[:2] = 0  # skip near-field DC
                 self._target_bin = int(np.argmax(energy))
                 real_dist = max(0.01, self._target_bin * self.DISTANCE_PER_BIN - RANGE_HARDWARE_OFFSET_M)
                 print(f"[BPPipeline] Fallback lock: bin={self._target_bin} ({real_dist:.2f}m)")
+
             if self._target_bin is None:
                 return  # keep accumulating
 
         # ---- Phase 2: Wait for full batch ----
         is_cold_start = (self._sbp_ema is None)
         required_frames = 512 if is_cold_start else self.MAX_FRAMES
-        if len(self._complex_buffer) < required_frames:
+        if self._valid_frames < required_frames:
             return
 
         # ---- Full MATLAB pipeline on 1024 frames ----
         print(f"[BPPipeline] Processing batch at frame {self._frame_count}...")
 
-        # Build mean_bin_frame_rx: [32, 1024, 1]  (MATLAB extract_3d_data)
-        mean_bin_frame_rx = np.concatenate(self._complex_buffer, axis=1)
+        # 拷贝一份处理数据，防止后续背景相减污染原 buffer
+        mean_bin_frame_rx = current_data.copy()
 
         # MATLAB: background = mean(bin_frame_rx, 2); mean_bin_frame_rx = bin_frame_rx - background
         background = np.mean(mean_bin_frame_rx, axis=1, keepdims=True)  # [32, 1, 1]
         mean_bin_frame_rx = mean_bin_frame_rx - background
 
-        # ---- Step 1+2: 1D CFAR + 2D CFAR (MATLAB lines 87-89) ----
+        # ---- Step 1+2: 1D CFAR + 2D CFAR ----
         overall_target_bins = find_target_bins_1d(
             mean_bin_frame_rx, self.DISTANCE_PER_BIN, num_targets=3, verbose=True
         )
         if len(overall_target_bins) == 0:
             print("[BPPipeline] CFAR: no target found, re-acquiring...")
             self._target_bin = None
-            self._complex_buffer.clear()
+            self._valid_frames = 0  # 替代 self._complex_buffer.clear()
             return
 
         target_bins, self._cfar_state = adaptive_2d_cfar(
@@ -177,25 +192,23 @@ class BPPipeline:
         if len(target_bins) == 0:
             print("[BPPipeline] 2D CFAR: no target confirmed, re-acquiring...")
             self._target_bin = None
-            self._complex_buffer.clear()
+            self._valid_frames = 0  # 替代 self._complex_buffer.clear()
             return
 
-        print(f"[BPPipeline] 2D CFAR confirmed {len(target_bins)} target(s): "
-              f"bins={list(target_bins)}")
+        print(f"[BPPipeline] 2D CFAR confirmed {len(target_bins)} target(s): bins={list(target_bins)}")
         target_bin = int(target_bins[0])
-        # Update target bin if CFAR found a better one
+
         if target_bin != self._target_bin:
             print(f"[BPPipeline] Target bin updated: {self._target_bin} → {target_bin}")
             self._target_bin = target_bin
 
-        # ---- Step 3: Phase extraction (MATLAB extract_target_phase) ----
-        # complex_data = mean_bin_frame_rx(target_bin, :, :) → [1024, 1]
-        complex_data = mean_bin_frame_rx[target_bin, :, :]  # [1024, 1]
-        phase_data = np.angle(complex_data)                   # [1024, 1]
-        unwrapped = np.unwrap(phase_data, axis=0)             # unwrap along time
-        unwrapped = unwrapped.squeeze()                       # [1024]
+        # ---- Step 3: Phase extraction ----
+        complex_data = mean_bin_frame_rx[target_bin, :, :]  # [N, 1]
+        phase_data = np.angle(complex_data)
+        unwrapped = np.unwrap(phase_data, axis=0)
+        unwrapped = unwrapped.squeeze()
 
-        # ---- Step 4: Frequency scaling (MATLAB: × 24/60) ----
+        # ---- Step 4: Frequency scaling ----
         unwrapped_scaled = unwrapped * (24.0 / 60.0)
 
         # ---- Step 4b: Low-signal detection → re-acquire ----
@@ -203,29 +216,25 @@ class BPPipeline:
         if phase_range < 0.001:
             print("[BPPipeline] Low signal, re-acquiring target...")
             self._target_bin = None
-            self._complex_buffer.clear()
+            self._valid_frames = 0  # 替代 self._complex_buffer.clear()
             return
 
-        # ---- Step 5: Downsample 200→50Hz first (reduces EMD cost ~10×) ----
+        # ---- Step 5: Downsample 200→50Hz ----
         wave_50hz_raw = resample_poly(unwrapped_scaled, up=50, down=200)
 
-        # ---- Step 6: Signal cleaning at 50Hz (MATLAB PhaseProcess.RadarSignalCleaner) ----
+        # ---- Step 6: Signal cleaning at 50Hz ----
         clean = clean_pulse_wave(wave_50hz_raw, fs=self.FS_TARGET)
 
-        # Take last 256 points (MATLAB: wave_50hz(end-255:end))
         if len(clean) >= self.N_INPUT:
             input_seq = clean[-self.N_INPUT:]
         else:
             input_seq = np.pad(clean, (self.N_INPUT - len(clean), 0))
 
         # ---- Step 7: Network inference ----
-        print(f"[BPPipeline] phase_range={phase_range:.4f}  "
-              f"clean_range={float(np.max(clean)-np.min(clean)):.4f}")
+        print(f"[BPPipeline] phase_range={phase_range:.4f}  clean_range={float(np.max(clean) - np.min(clean)):.4f}")
         bp_waveform = self._bp.predict(input_seq.astype(np.float32))
 
         # ---- Step 8: SBP / DBP extraction ----
-        print(f"[BPPipeline] net_out range=[{float(np.min(bp_waveform)):.2f}, "
-              f"{float(np.max(bp_waveform)):.2f}] mmHg")
         sbp, dbp, info = extract_bp(bp_waveform, fs=self.FS_TARGET)
 
         if np.isnan(sbp):
@@ -236,9 +245,9 @@ class BPPipeline:
         if self._bad_signal_count >= 4:
             print("[BPPipeline] Target lost or moved! Forcing re-acquire...")
             self._target_bin = None
-            self._complex_buffer.clear()
-            self._cfar_state = None  # 关键：清空 CFAR 的死板记忆
+            self._cfar_state = None
             self._bad_signal_count = 0
+            self._valid_frames = 0  # 替代 self._complex_buffer.clear()
             return
 
         # ---- Step 9: Temporal smoothing (median → EMA) ----
@@ -251,9 +260,7 @@ class BPPipeline:
         dbp_smooth = float(dbp)
 
         if len(self._sbp_history) > 0:
-            # Median filter to reject outliers
             sbp_median = float(np.median(list(self._sbp_history)))
-            # EMA with α=0.3
             if self._sbp_ema is None:
                 self._sbp_ema = sbp_median
             else:
@@ -282,23 +289,32 @@ class BPPipeline:
         )
         self._push_to_display(result)
 
-        # ---- Slide window forward (keeps most recent data for next batch) ----
-        self._complex_buffer = self._complex_buffer[self.STEP_FRAMES:]
+        # ==========================================
+        # 3. 滑动窗口前进 (替代原有的切片自赋值)
+        # ==========================================
+        shift = self.STEP_FRAMES
+        if self._valid_frames > shift:
+            # 将后面的数据平移到最前面
+            self._buffer[:, :-shift, :] = self._buffer[:, shift:, :]
+            # 有效帧数减少，腾出空间给接下来的新数据
+            self._valid_frames -= shift
+        else:
+            self._valid_frames = 0
 
         if not np.isnan(sbp):
             real_dist = max(0.01, target_bin * self.DISTANCE_PER_BIN - RANGE_HARDWARE_OFFSET_M)
-            print(f"[BPPipeline] Result: SBP={sbp:.1f} DBP={dbp:.1f} mmHg "
-                  f"dist={real_dist:.2f}m")
+            print(f"[BPPipeline] Result: SBP={sbp:.1f} DBP={dbp:.1f} mmHg dist={real_dist:.2f}m")
 
     def _push_to_display(self, result: BPResult) -> None:
-        try:
-            self.display_queue.put_nowait(result)
-        except queue.Full:
+        if self.display_queue.full():
             try:
+                # 扔掉最旧的一帧，给新数据腾地方
                 self.display_queue.get_nowait()
             except queue.Empty:
                 pass
-            try:
-                self.display_queue.put_nowait(result)
-            except queue.Full:
-                pass
+
+        try:
+            self.display_queue.put_nowait(result)
+        except queue.Full:
+            # 极端情况：如果就在这一瞬间又满了，说明消费端卡死，直接丢弃本次更新
+            print("[BPPipeline] UI线程卡顿，丢弃过载帧")

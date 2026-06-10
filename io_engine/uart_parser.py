@@ -75,12 +75,11 @@ class UartParser:
         if len(self._buffer) < packet_total:
             return False  # 数据不足，等待
 
-        payload = self._buffer[payload_start:packet_total]
+        payload = self._buffer[payload_start : payload_start + payload_len]
 
         # 解析 payload 头
         frame_index = struct.unpack_from("<I", payload, 0)[0]
-        # frame_length = struct.unpack_from("<I", payload, 4)[0]  # 不用此字段
-        # data_offset = struct.unpack_from("<I", payload, 8)[0]
+
 
         # 解码 FFT 数据 (跳过 12 字节 payload 头)
         fft_bytes = payload[12:]

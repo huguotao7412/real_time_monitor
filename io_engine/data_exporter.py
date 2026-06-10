@@ -14,6 +14,7 @@ import os
 import csv
 from datetime import datetime
 from typing import Any
+import threading
 
 import numpy as np
 
@@ -245,6 +246,36 @@ def export_edf(
         writer.writeSamples(signal_data.astype(np.int16))
 
     return edf_path
+
+
+def export_hdf5_async(
+        path: str,
+        breath_waveform_history: np.ndarray,
+        heart_waveform_history: np.ndarray,
+        bpm_history: list[tuple[float, float, float]],
+        sqi_history: list[dict],
+        metadata: dict | None = None,
+        callback=None  # 支持导出完成后的回调
+) -> None:
+    """以非阻塞方式导出 HDF5"""
+    # 必须对数组进行深拷贝，防止主线程的数据在此期间被修改
+    breath_copy = breath_waveform_history.copy()
+    heart_copy = heart_waveform_history.copy()
+    bpm_copy = list(bpm_history)
+    sqi_copy = list(sqi_history)
+
+    def _task():
+        try:
+            out_path = export_hdf5(path, breath_copy, heart_copy, bpm_copy, sqi_copy, metadata)
+            if callback:
+                callback(out_path, None)
+        except Exception as e:
+            if callback:
+                callback(None, e)
+
+    # 启动后台守护线程写入磁盘
+    thread = threading.Thread(target=_task, daemon=True)
+    thread.start()
 
 
 def export_bp_csv(path: str, csv_rows: list[dict]) -> str:

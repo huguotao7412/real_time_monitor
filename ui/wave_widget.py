@@ -1,6 +1,7 @@
 """Single-channel waveform display with optional fill, axis toggle, and state-driven visual degradation."""
 
 import time
+from PyQt6.QtCore import QTimer
 
 import pyqtgraph as pg
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel
@@ -53,6 +54,15 @@ class WaveWidget(QWidget):
         self._decay_start = 1.0
         self._decay_start_time = time.time()
         self._decay_duration = 1.5
+
+        # 新增：数据缓冲
+        self._latest_data_buffer = np.zeros(max_points)
+        self._needs_update = False
+
+        # 新增：30FPS 定时器解耦渲染
+        self.render_timer = QTimer(self)
+        self.render_timer.timeout.connect(self._render_plot)
+        self.render_timer.start(33)  # ~30 Hz
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -125,8 +135,16 @@ class WaveWidget(QWidget):
         """Update waveform data, applying current visual degradation."""
         if len(y) == 0:
             return
+        self._latest_data_buffer = y[-self.max_points:]
+        self._needs_update = True
+
+    def _render_plot(self) -> None:
+        """定时器调用的实际渲染函数"""
+        if not self._needs_update:
+            return
+
         self._update_appearance()
-        self._data = y[-self.max_points:] * self._decay_factor
+        self._data = self._latest_data_buffer * self._decay_factor
         x = np.arange(len(self._data))
 
         c = self._current_color
@@ -136,9 +154,12 @@ class WaveWidget(QWidget):
         if self._fill_mode and hasattr(self, "fill"):
             self._zero_line.setData(x, np.zeros_like(self._data))
             self.fill.setCurves(self.curve, self._zero_line)
+            # 优化点2中会详细优化这里的画笔创建
             fill_color = QColor(c.red(), c.green(), c.blue(), 60)
-            self._fill_brush = pg.mkBrush(fill_color)
+            self._fill_brush.setColor(fill_color)
             self.fill.setBrush(self._fill_brush)
+
+        self._needs_update = False
 
     # ── internal helpers ────────────────────────────────────────
 
