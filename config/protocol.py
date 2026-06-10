@@ -77,3 +77,34 @@ HEART_USE_NEW_SMOOTHER = True
 
 # === 距离标定 ===
 RANGE_HARDWARE_OFFSET_M: float = 0.19  # 雷达天线固有延迟补偿，用卷尺实测后标定（BP: 16cm真值→35cm读数, offset=0.19）
+
+# ==========================================
+# === 雷达底层硬件科研配置 (RADAR HARDWARE) ===
+# ==========================================
+# 支持参数化修改帧率、模式等，无需修改底层控制逻辑
+
+# 常规监测模式 (例如心率/呼吸监测)
+RADAR_CFG_NORMAL = {
+    "mode": "4 1",         # mmwc mode 4 1: 2T4R, 1DFFT
+    "frame": "50 -6",      # mmwc frame 50 -6: 10ms period (100Hz), -6(无限帧)
+    "report": "cube -1",   # mmwc report cube -1: 无限帧上报
+    "baudrate": DATA_BAUDRATE # 继承全局设置 1000000
+}
+
+# 血压(BP)等高频特征监测模式
+RADAR_CFG_BP = {
+    "mode": "0 1",         # mmwc mode 0 1: 1T1R, 1DFFT
+    "frame": "5 -6",       # mmwc frame 5 -6: 5ms period (200Hz), -6(无限帧)
+    "report": "cube -1",   # mmwc report cube -1: 无限帧上报
+    "baudrate": DATA_BAUDRATE
+}
+
+# === 网络流配置 ===
+TCP_DEFAULT_HOST = "127.0.0.1"
+TCP_DEFAULT_PORT = 9000
+
+# === 雷达物理与硬件常量 ===
+RADAR_START_FREQ_MHZ = 58000       # RS6240 雷达起始频率 (MHz)
+RANGE_RESOLUTION_M = 0.039         # RS6240 距离分辨率 (3.9cm)
+MIN_VALID_RANGE_BIN = 4            # 跳过近场天线耦合杂波的最近 Bin 索引 (约等于盲区)
+BEAMFORMING_RX_CHANNELS = [0, 1, 4, 5]  # MUSIC/LCMV 波束成形通道选择 (默认 2T4R, 取前两个TX各前两个RX)

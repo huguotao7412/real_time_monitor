@@ -9,12 +9,13 @@
 
 import time
 from io_engine.serial_manager import SerialManager
+from config.protocol import DATA_BAUDRATE, RADAR_CFG_NORMAL, RADAR_CFG_BP
 
 
 class RadarMgr:
     def __init__(self, serial_mgr: SerialManager):
         self._ser = serial_mgr
-        self._data_baudrate = 1000000
+        self._data_baudrate = DATA_BAUDRATE
 
     def connect(self, control_port: str, data_port: str) -> bool:
         try:
@@ -31,49 +32,36 @@ class RadarMgr:
         time.sleep(0.3)
         return True
 
-    def boot(self) -> bool:
-        """MATLAB RadarData.m 的初始化序列"""
+    def _boot_with_cfg(self, cfg: dict, mode_name: str) -> bool:
+        """根据传入的配置字典，动态生成启动指令序列"""
         commands = [
             "mmwc open",
             "mmwc stop",
-            "mmwc mode 4 1",         # 2T4R, 1DFFT
-            "mmwc frame 50 -6",      # 10ms period (100Hz), infinite
+            f"mmwc mode {cfg['mode']}",  # 动态天线与FFT模式
+            f"mmwc frame {cfg['frame']}",  # 动态帧率与周期
             "mmwc uart on",
-            "mmwc baudrate 1000000",
-            "mmwc report cube -1",   # infinite frames
-            "mmwc start",            # ignition
-        ]
-
-        all_ok = True
-        for cmd in commands:
-            print(f"  [{cmd}]", flush=True)
-            ok = self._send_command(cmd)
-            if not ok:
-                all_ok = False
-
-        print(f"[RadarMgr] Boot {'OK' if all_ok else 'with warnings'}")
-        return all_ok
-
-    def boot_bp(self) -> bool:
-        """Boot radar for BP mode: 1T1R, 32bin, 200Hz (5ms frame period)."""
-        commands = [
-            "mmwc open",
-            "mmwc stop",
-            "mmwc mode 0 1",         # 1T1R, 1DFFT
-            "mmwc frame 5 -6",       # 5ms period (200Hz), infinite
-            "mmwc uart on",
-            "mmwc baudrate 1000000",
-            "mmwc report cube -1",
+            f"mmwc baudrate {cfg['baudrate']}",  # 动态波特率
+            f"mmwc report {cfg['report']}",  # 动态上报格式
             "mmwc start",
         ]
+
         all_ok = True
         for cmd in commands:
             print(f"  [{cmd}]", flush=True)
             ok = self._send_command(cmd)
             if not ok:
                 all_ok = False
-        print(f"[RadarMgr] BP Boot {'OK' if all_ok else 'with warnings'}")
+
+        print(f"[RadarMgr] {mode_name} Boot {'OK' if all_ok else 'with warnings'}")
         return all_ok
+
+    def boot(self) -> bool:
+        """MATLAB RadarData.m 的初始化序列 (常规模式)"""
+        return self._boot_with_cfg(RADAR_CFG_NORMAL, "Normal")
+
+    def boot_bp(self) -> bool:
+        """Boot radar for BP mode"""
+        return self._boot_with_cfg(RADAR_CFG_BP, "BP")
 
     def shutdown(self) -> None:
         self._send_command("mmwc stop")

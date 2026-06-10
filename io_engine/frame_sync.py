@@ -1,5 +1,6 @@
 import struct
 from models.radar_frame import FrameHeader
+from config.protocol import FRAME_MAGIC, MSG_ID_FFT, RADAR_START_FREQ_MHZ
 
 
 class FrameSyncFSM:
@@ -33,7 +34,7 @@ class FrameSyncFSM:
 
     def _step(self) -> tuple[FrameHeader | None, bytes | None]:
         # State 1: Find magic word
-        idx = self._buffer.find(b"PSIC")
+        idx = self._buffer.find(FRAME_MAGIC)
         if idx == -1:
             # 保留最后 3 个字节 (防止 Magic 跨包)
             if len(self._buffer) > 3:
@@ -72,14 +73,14 @@ class FrameSyncFSM:
 
         try:
             magic = data[0:4]
-            if magic != b"PSIC":
+            if magic != FRAME_MAGIC:
                 return None, 0
 
             msg_id = data[4]
             # 假设 PacketLen 在 data[5:7], uint16 LE (待验证: 也可能是 uint32 在 data[5:9])
             packet_len = struct.unpack_from("<H", data, 5)[0]
 
-            if msg_id == 0xC1:
+            if msg_id == MSG_ID_FFT:
                 # FFT 数据: 解析 Payload 头 (位于 Packet Header 之后)
                 ph = self.PACKET_HEADER_SIZE  # payload header offset
                 frame_index = struct.unpack_from("<I", data, ph)[0]
@@ -95,7 +96,7 @@ class FrameSyncFSM:
                     frame_type=0,
                     rx_ant_num=0,
                     tx_ant_num=0,
-                    start_freq_mhz=58000,
+                    start_freq_mhz=RADAR_START_FREQ_MHZ,
                     range_fft_num=0,
                     doppler_fft_num=0,
                     max_range_cm=0,

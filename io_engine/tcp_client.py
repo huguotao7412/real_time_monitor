@@ -2,12 +2,13 @@
 
 import socket
 import time
+from config.protocol import TCP_DEFAULT_HOST, TCP_DEFAULT_PORT
 
 
 class TCPDataSource:
     """连接到 bin_relay.py 或其他 TCP 数据源，提供 read() 接口"""
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 9000):
+    def __init__(self, host: str = TCP_DEFAULT_HOST, port: int = TCP_DEFAULT_PORT):
         self.host = host
         self.port = port
         self._socket: socket.socket | None = None

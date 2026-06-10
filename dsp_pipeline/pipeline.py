@@ -12,6 +12,7 @@ from config.protocol import (
     WINDOW_SIZE, FS_HZ, BPM_UPDATE_INTERVAL,
     BREATH_RAW_HISTORY_MAXLEN, BREATH_HISTORY_MAXLEN,
     BREATH_USE_NEW_SMOOTHER, HEART_USE_NEW_SMOOTHER,
+    RANGE_RESOLUTION_M, MIN_VALID_RANGE_BIN, BEAMFORMING_RX_CHANNELS
 )
 from models.radar_frame import RadarFrame
 from dsp_pipeline.vital_signs import VitalSigns
@@ -26,6 +27,7 @@ from dsp_pipeline.smoothers import SmootherState, apply_smoothing_chain, compute
 
 
 class Pipeline:
+    _MUSIC_CHANNELS = BEAMFORMING_RX_CHANNELS
     def __init__(self, use_beamforming: bool = True):
         self.raw_queue = queue.Queue(maxsize=RAW_QUEUE_MAXSIZE)
         self.display_queue = queue.Queue(maxsize=DISPLAY_QUEUE_MAXSIZE)
@@ -49,8 +51,8 @@ class Pipeline:
         self._cfar_initial_frames: int = int(FS_HZ * 1.0)
         self._cfar_rescan_interval: int = int(FS_HZ * 5.0)
         self._current_bin_snr: float = 0.0
-        self.DISTANCE_PER_BIN: float = 0.039  # RS6240 range resolution
-        self._MIN_RANGE_BIN: int = 4  # 跳过近场天线耦合杂波 (bins 1-9 ≈ 2.5-22.5cm)
+        self.DISTANCE_PER_BIN: float = RANGE_RESOLUTION_M  # RS6240 range resolution
+        self._MIN_RANGE_BIN: int = MIN_VALID_RANGE_BIN  # 跳过近场天线耦合杂波 (bins 1-9 ≈ 2.5-22.5cm)
 
         # Feature toggles
         self._use_beamforming = use_beamforming
