@@ -2,7 +2,12 @@
 
 import numpy as np
 import warnings
-from config.protocol import FS_HZ,FFT_N_HEART,FFT_N_BREATH
+from config.protocol import (
+    FS_HZ, FFT_N_HEART, FFT_N_BREATH,
+    BPM_PEAK_HEIGHT_RATIO, SUBHARMONIC_FREQ_RATIO_MIN, SUBHARMONIC_TOLERANCE,
+    BREATH_TIME_SAVGOL_SEC, BREATH_PEAK_PROMINENCE_RATIO, BREATH_BPM_MIN, BREATH_BPM_MAX,
+    STFT_MIN_WINDOW_SEC, STFT_WINDOW_RATIO, STFT_OVERLAP_RATIO
+)
 
 
 def estimate_bpm(
@@ -66,7 +71,7 @@ def estimate_bpm(
         from scipy.signal import find_peaks
 
         # 1. 寻找所有能量大于全局最大值 20% 的显著峰
-        peaks, _ = find_peaks(band_spectrum, height=max_val * 0.20)
+        peaks, _ = find_peaks(band_spectrum, height=max_val * BPM_PEAK_HEIGHT_RATIO)
 
         if len(peaks) == 0:
             peak_idx = np.argmax(band_spectrum)
@@ -83,11 +88,11 @@ def estimate_bpm(
             # 3. 基频拯救机制 (Sub-Harmonic Rescue)
             best_f = f_max
             for f_cand in np.sort(peak_freqs):
-                if f_cand >= f_max * 0.85:
+                if f_cand >= f_max * SUBHARMONIC_FREQ_RATIO_MIN:
                     break
 
                 ratio = f_max / f_cand
-                if abs(ratio - round(ratio)) < 0.15:
+                if abs(ratio - round(ratio)) < SUBHARMONIC_TOLERANCE:
                     best_f = f_cand
                     peak_idx = peaks[np.where(peak_freqs == f_cand)[0][0]]
                     break
@@ -144,7 +149,7 @@ def estimate_breath_bpm_time_domain(
     # 3. 核心突破：使用 Savitzky-Golay 滤波器作为零相位低通滤波器（替代带通）
     # 窗口选 0.6 秒左右（20Hz下约13点），既能完美抹除心跳(1~2Hz)和噪声，又绝不产生振铃和波形分裂
     from scipy.signal import savgol_filter, find_peaks
-    window_len = int(0.6 * fs)
+    window_len = int(BREATH_TIME_SAVGOL_SEC * fs)
     if window_len % 2 == 0:
         window_len += 1
     window_len = max(5, min(window_len, n - 1))
@@ -158,8 +163,8 @@ def estimate_breath_bpm_time_domain(
     min_distance = int(min_interval_sec * fs / 2)
     signal_std = np.std(smoothed)
 
-    peaks, _ = find_peaks(smoothed, distance=min_distance, prominence=signal_std * 0.3)
-    valleys, _ = find_peaks(-smoothed, distance=min_distance, prominence=signal_std * 0.3)
+    peaks, _ = find_peaks(smoothed, distance=min_distance, prominence=signal_std * BREATH_PEAK_PROMINENCE_RATIO)
+    valleys, _ = find_peaks(-smoothed, distance=min_distance, prominence=signal_std * BREATH_PEAK_PROMINENCE_RATIO)
 
     intervals = []
     if len(peaks) >= 2:
@@ -182,7 +187,7 @@ def estimate_breath_bpm_time_domain(
     mean_interval = np.median(intervals[valid])
     bpm = 60.0 / mean_interval
 
-    if 6 <= bpm <= 60:
+    if BREATH_BPM_MIN <= bpm <= BREATH_BPM_MAX:
         return float(bpm)/2
     return 0.0
 
@@ -262,12 +267,12 @@ def estimate_bpm_stft(
 
     # --- Heart STFT (MATLAB: 25% hamming, 80% overlap) ---
     window_sec = n / fs
-    if window_sec < 8.0:
+    if window_sec < STFT_MIN_WINDOW_SEC:
             # 短窗口下，强制 STFT 输出失效，依赖下方的高精度 FFT
             heart_bpm_stft = 0.0
     else:
-        heart_win = max(64, int(n * 0.6))
-        heart_overlap = int(heart_win * 0.8)
+        heart_win = max(64, int(n * STFT_WINDOW_RATIO))
+        heart_overlap = int(heart_win * STFT_OVERLAP_RATIO)
         nfft_h = max(n_fft, 2 ** int(np.ceil(np.log2(heart_win))))
 
         f_h, t_h, Zxx_h = stft(

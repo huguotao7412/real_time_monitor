@@ -5,6 +5,11 @@ adaptive threshold factor β, and confirms targets detected by coarse 1D CFAR.
 """
 
 import numpy as np
+from config.protocol import (
+    CFAR_BETA_INITIAL, CFAR_BETA_MIN, CFAR_BETA_MAX, CFAR_NOISE_PERCENTILE,
+    CFAR_1D_ALPHA, CFAR_1D_NOISE_RATIO,
+    CFAR_2D_REF_RNG, CFAR_2D_GUARD_RNG, CFAR_2D_REF_DOP, CFAR_2D_GUARD_DOP, CFAR_2D_DOP_SEARCH
+)
 
 
 def adaptive_2d_cfar(
@@ -12,11 +17,11 @@ def adaptive_2d_cfar(
     distance_per_bin: float,
     prev_state: dict | None = None,
     overall_target_bins: np.ndarray | None = None,
-    ref_cells_rng: int = 2,
-    guard_cells_rng: int = 1,
-    ref_cells_dop: int = 6,
-    guard_cells_dop: int = 2,
-    dop_search_width: int = 15,
+    ref_cells_rng: int = CFAR_2D_REF_RNG,
+    guard_cells_rng: int = CFAR_2D_GUARD_RNG,
+    ref_cells_dop: int = CFAR_2D_REF_DOP,
+    guard_cells_dop: int = CFAR_2D_GUARD_DOP,
+    dop_search_width: int = CFAR_2D_DOP_SEARCH,
 ) -> tuple[np.ndarray, np.ndarray, dict, dict]:
     """2D CFAR detection with adaptive threshold.
 
@@ -44,10 +49,10 @@ def adaptive_2d_cfar(
     center_dop_idx = num_doppler // 2  # Python 0-indexed equivalent of floor(N/2)+1
 
     # ---- 2. Global noise estimate & adaptive beta (MATLAB lines 206-218) ----
-    current_global_noise = float(np.percentile(rdm_power, 80))
+    current_global_noise = float(np.percentile(rdm_power, CFAR_NOISE_PERCENTILE))
 
     if prev_state is None:
-        current_beta = 6.0
+        current_beta = CFAR_BETA_INITIAL
         last_global_noise = current_global_noise if current_global_noise > 0 else 1e-10
     else:
         current_beta = prev_state["last_beta"]
@@ -56,7 +61,7 @@ def adaptive_2d_cfar(
             last_global_noise = 1e-10
 
     scaling_ratio = current_global_noise / last_global_noise
-    new_beta = max(5.0, min(current_beta * scaling_ratio, 30.0))
+    new_beta = max(CFAR_BETA_MIN, min(current_beta * scaling_ratio, CFAR_BETA_MAX))
 
     # ---- 3. 2D CFAR scan (MATLAB lines 220-263) ----
     doppler_half = dop_search_width
@@ -173,7 +178,7 @@ def adaptive_2d_cfar(
 def coarse_1d_cfar_candidates(
     data_cube: np.ndarray,
     num_candidates: int = 3,
-    sensitivity_alpha: float = 3.0,
+    sensitivity_alpha: float =CFAR_1D_ALPHA,
     start_bin: int = 1,
 ) -> np.ndarray:
     """1D CFAR coarse search for candidate range bins (MATLAB findTargetBin).
@@ -197,7 +202,7 @@ def coarse_1d_cfar_candidates(
 
     # Adaptive threshold from lower 70%
     sorted_energy = np.sort(profile)
-    n_noise = int(0.7 * len(sorted_energy))
+    n_noise = int(CFAR_1D_NOISE_RATIO * len(sorted_energy))
     noise_samples = sorted_energy[:max(1, n_noise)]
     noise_mean = float(np.mean(noise_samples))
     noise_std = float(np.std(noise_samples))

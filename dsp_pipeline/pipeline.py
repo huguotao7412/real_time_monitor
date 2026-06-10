@@ -15,7 +15,9 @@ from config.protocol import (
     RANGE_RESOLUTION_M, MIN_VALID_RANGE_BIN, BEAMFORMING_RX_CHANNELS,
     CFAR_ROLLING_BUFFER_SEC, CFAR_INITIAL_SEC, CFAR_RESCAN_SEC, CFAR_SNR_UPDATE_RATIO,
     DSP_STARTUP_SEC, MUSIC_UPDATE_SEC, EMD_MAX_IMF, FFT_N_BREATH, FFT_N_HEART,
-    SQI_RECENT_SEC, PHASE_RANGE_MIN_NORMAL, BREATH_RATIO_MIN
+    SQI_RECENT_SEC, PHASE_RANGE_MIN_NORMAL, BREATH_RATIO_MIN,
+    CFAR_RESCAN_MIN_FRAMES, SAVGOL_WINDOW_LENGTH, SAVGOL_POLYORDER,
+    WELCH_NPERSEG, HEART_KALMAN_HISTORY_MAXLEN
 )
 from models.radar_frame import RadarFrame
 from dsp_pipeline.vital_signs import VitalSigns
@@ -259,7 +261,7 @@ class Pipeline:
         SNR of self._best_bin measured from the rolling buffer data at this moment.
         """
         cubes = list(self._cfar_rolling_buffer)
-        if len(cubes) < 20:
+        if len(cubes) < CFAR_RESCAN_MIN_FRAMES:
             return None, 0.0, 0.0
         mean_bin_frame_rx = self._build_mean_bin_frame_rx(cubes)
         candidates = coarse_1d_cfar_candidates(mean_bin_frame_rx)
@@ -394,7 +396,8 @@ class Pipeline:
             return None
 
         no_dc = remove_dc(displacement)
-        enhanced = savgol_filter(no_dc, window_length=9, polyorder=3, deriv=1)
+        enhanced = savgol_filter(no_dc, window_length=SAVGOL_WINDOW_LENGTH,
+                                 polyorder=SAVGOL_POLYORDER, deriv=1)
 
         # SOS 带通滤波: 呼吸用原始位移防振铃分裂, 心跳用差分放大高频脉冲
         breath_signal = self._filter.filter_breath(no_dc)
@@ -469,8 +472,8 @@ class Pipeline:
                             self._heart_raw_history.append(heart_bpm)
                             heart_bpm = float(np.median(list(self._heart_raw_history)))
                             self._heart_history.append(heart_bpm)
-                            if len(self._heart_history) > 10:
-                                self._heart_history = self._heart_history[-10:]
+                            if len(self._heart_history) > HEART_KALMAN_HISTORY_MAXLEN:
+                                self._heart_history = self._heart_history[-HEART_KALMAN_HISTORY_MAXLEN:]
                             heart_bpm = kalman_smooth(self._heart_history, q=1e-3, r=0.5)
                             self._last_valid_heart_bpm = heart_bpm
                     self._cached_breath_wave = adv_breath
@@ -553,7 +556,7 @@ class Pipeline:
         if phase_range < PHASE_RANGE_MIN_NORMAL:
             return {"valid": False, "reason": f"phase_range={phase_range:.4f}"}
 
-        freqs, psd = welch(signal, fs=FS_HZ, nperseg=min(128, len(signal)))
+        freqs, psd = welch(signal, fs=FS_HZ, nperseg=min(WELCH_NPERSEG, len(signal)))
         breath_mask = (freqs >= 0.1) & (freqs <= 0.8)
         total_power = np.sum(psd) + 1e-10
         breath_ratio = np.sum(psd[breath_mask]) / total_power
