@@ -174,15 +174,27 @@ class Pipeline:
             if len(self._cfar_accumulator) >= self._cfar_initial_frames:
                 self._best_bin, self._current_bin_snr = self._run_2d_cfar_lock()
                 self._cfar_accumulator.clear()
+
             if self._best_bin is None:
-                return None
+                return VitalSigns(
+                    timestamp=time.time(),
+                    frame_index=self._frame_count,
+                    breath_waveform=np.array([]),
+                    breath_bpm=0.0,
+                    heart_bpm=0.0,
+                    heart_waveform=np.array([]),
+                    quality={"valid": False, "reason": "Searching Target"}
+                )
         elif self._frame_count > 0 and self._frame_count % self._cfar_rescan_interval == 0:
                 new_bin, new_snr, current_actual_snr = self._run_2d_cfar_rescan()
                 if new_bin is not None:
                     # 修复：当人离开原位置时，旧位置 SNR 为 0.0。
                     # 只要旧位置没信号了，或者新位置信号比旧位置强 1.2 倍，就果断更新距离！
-                    if current_actual_snr == 0.0 or new_snr > current_actual_snr * CFAR_SNR_UPDATE_RATIO:
-                        print(f"[DSP] Target moved! Range updated to bin: {new_bin}")
+                    MIN_NEW_TARGET_SNR = 12.0
+                    if new_snr > MIN_NEW_TARGET_SNR and (
+                            current_actual_snr < 5.0 or new_snr > current_actual_snr * CFAR_SNR_UPDATE_RATIO):
+                        print(
+                            f"[DSP] Target moved! Range updated to bin: {new_bin} (SNR: {new_snr:.1f} vs Old: {current_actual_snr:.1f})")
                         self._best_bin = new_bin
                         self._current_bin_snr = new_snr
                         self._phase_buffer.clear()
@@ -415,7 +427,8 @@ class Pipeline:
             recent_phase_range = phase_range
 
         # 弱信号检测 → Range Bin 重捕获
-        in_low_signal = (recent_phase_range < PHASE_RANGE_MIN_NORMAL)
+        SNR_THRESHOLD_EMPTY = 10.0  # 你可以根据实际雷达表现微调这个经验值
+        in_low_signal = (recent_phase_range < PHASE_RANGE_MIN_NORMAL) and (self._current_bin_snr < SNR_THRESHOLD_EMPTY)
 
         if in_low_signal:
             self._low_signal_frame_count += 1
