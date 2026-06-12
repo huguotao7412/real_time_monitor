@@ -194,10 +194,7 @@ class Pipeline:
         rx_complex = None
         try:
             rx_complex = self._extract_rx_complex(data_cube)
-            phase = extract_phase(data_cube, self._best_bin)
-
             self._rx_buffer.append(rx_complex)
-            self._phase_buffer.append(phase)
         except (IndexError, ValueError):
             pass
 

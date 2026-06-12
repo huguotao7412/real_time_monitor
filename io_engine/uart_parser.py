@@ -120,7 +120,13 @@ class UartParser:
         """int16 对 → complex64"""
         if len(data) < 4:
             return None
-        as_i16 = np.frombuffer(data, dtype="<i2")
+        if len(data) % 2 != 0:
+            data = data[:-(len(data) % 2)]  # 丢弃末尾不完整的字节
+
+        try:
+            as_i16 = np.frombuffer(data, dtype="<i2")
+        except ValueError:
+            return None
         imag = as_i16[0::2]
         real = as_i16[1::2]
         n = min(len(imag), len(real))

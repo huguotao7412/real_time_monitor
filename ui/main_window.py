@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QFileDialog, QMessageBox, QLabel, QPushButton,
     QTabWidget, QInputDialog,
 )
-from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtCore import QTimer, Qt,QMetaObject,Q_ARG
 from PyQt6.QtGui import QFont
 
 from config.protocol import UI_REFRESH_MS
@@ -430,12 +430,16 @@ class MainWindow(QMainWindow):
                     export_edf(path, breath, heart, fs=20.0)
 
                 # 4. 导出成功，通过单次定时器安全地切回主线程进行弹窗
-                QTimer.singleShot(0, lambda: self._on_save_success(path))
+                QMetaObject.invokeMethod(self, "_on_save_success",
+                                         Qt.ConnectionType.QueuedConnection,
+                                         Q_ARG(str, path))
 
             except Exception as e:
                 # 导出失败，同样切回主线程弹窗报错
                 error_msg = str(e)
-                QTimer.singleShot(0, lambda: self._on_save_error(error_msg))
+                QMetaObject.invokeMethod(self, "_on_save_error",
+                                         Qt.ConnectionType.QueuedConnection,
+                                         Q_ARG(str, error_msg))
 
         # 启动后台守护线程执行保存任务
         threading.Thread(target=export_task, daemon=True).start()
