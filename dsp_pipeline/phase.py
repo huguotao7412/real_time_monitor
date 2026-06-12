@@ -15,8 +15,10 @@ def extract_phase(data_cube: np.ndarray, range_bin_idx: float) -> np.ndarray:
     Returns:
         相位值 (弧度)
     """
-    bin_idx = int(range_bin_idx)
-    complex_vals = data_cube[bin_idx, 0, :]  # [rx]
+    max_bin_idx = data_cube.shape[0] - 1
+    # 限制索引在有效范围内 [0, max_bin_idx]
+    bin_idx = max(0, min(int(range_bin_idx), max_bin_idx))
+    complex_vals = data_cube[bin_idx, 0, :]
     best_idx = np.argmax(np.abs(complex_vals))
     best_complex = complex_vals[best_idx]
     return np.arctan2(best_complex.imag, best_complex.real)

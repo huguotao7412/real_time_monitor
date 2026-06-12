@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QFileDialog, QMessageBox, QLabel, QPushButton,
     QTabWidget, QInputDialog,
 )
-from PyQt6.QtCore import QTimer, Qt,QMetaObject,Q_ARG
+from PyQt6.QtCore import QTimer, Qt,QMetaObject,Q_ARG, pyqtSignal
 from PyQt6.QtGui import QFont
 
 from config.protocol import UI_REFRESH_MS
@@ -29,6 +29,7 @@ from ui.monitor_mode import MonitorMode, HRMode, BPMode
 
 
 class MainWindow(QMainWindow):
+    _start_research_signal = pyqtSignal()
     def __init__(self, bp_mode: bool = False):
         super().__init__()
         self.setWindowTitle(tr("window_title"))
@@ -57,6 +58,7 @@ class MainWindow(QMainWindow):
 
         self._setup_ui()
         self._setup_timers()
+        self._start_research_signal.connect(self._research_tab.start)
 
     def _setup_ui(self) -> None:
         # Menu bar with language switch
@@ -245,7 +247,7 @@ class MainWindow(QMainWindow):
         self._start_time = time.time()
         self._frame_count = 0
         self._running = True
-        self._research_tab.start()
+        self._start_research_signal.emit()
         self._serial_error = False
         self._serial_status = tr("serial_capturing", ctrl_port, data_port)
         print("[Serial Init] Starting I/O loop...")
@@ -254,37 +256,38 @@ class MainWindow(QMainWindow):
         print("[Serial Init] Done!")
 
     def _serial_io_loop(self) -> None:
-        while self._running and not self._stop_event.is_set():
-            try:
-                raw = self._serial_mgr.read_data(4096)
-                if not raw:
-                    continue
-                frames = self._uart_parser.feed(raw)
-                for fft_data in frames:
-                    self._frame_count += 1
-                    frame = self._current_mode.build_frame(fft_data, self._frame_count)
-                    self._current_mode.feed_frame(frame)
-            except Exception as e:
-                print(f"[Serial I/O] {e}")
-                time.sleep(0.5)
+        try:
+            while self._running and not self._stop_event.is_set():
+                try:
+                    # 这里的 read_data 依赖 serial 的 timeout 参数（不可为 None，否则会永久阻塞）
+                    raw = self._serial_mgr.read_data(4096)
+                    if not raw:
+                        continue  # 超时唤醒后，如果没有数据，会重新判断 while 循环条件
+                    frames = self._uart_parser.feed(raw)
+                    for fft_data in frames:
+                        self._frame_count += 1
+                        frame = self._current_mode.build_frame(fft_data, self._frame_count)
+                        self._current_mode.feed_frame(frame)
+                except Exception as e:
+                    print(f"[Serial I/O] {e}")
+                    time.sleep(0.5)
+        finally:
+            # 循环结束（不论是正常停止还是异常退出），由 IO 线程自行安全关闭底层串口
+            if self._serial_mgr:
+                print("[Serial I/O] Thread exiting, safely closing serial ports...")
+                self._serial_mgr.close()
 
     def _on_toggle_mode(self) -> None:
         """Hot-switch between HR and BP monitoring modes (serial only)."""
         was_running = self._running
 
-        # 1. Stop current I/O
+        # 1. Stop current I/O safely
         if was_running:
             self._running = False
             if self._stop_event:
                 self._stop_event.set()
-            # Close serial data port to unblock read_data()
-            if self._serial_mgr and self._serial_mgr.data_serial:
-                try:
-                    self._serial_mgr.data_serial.close()
-                except Exception:
-                    pass
             if self._io_thread:
-                self._io_thread.join(timeout=5)
+                self._io_thread.join(timeout=1.0) # 等待 IO 线程自身干净地结束并关闭串口
 
         # 2. Stop pipeline + shutdown radar
         self._current_mode.stop()
@@ -341,19 +344,18 @@ class MainWindow(QMainWindow):
 
     def _on_stop(self) -> None:
         self._running = False
+
         if self._radar_mgr:
             self._radar_mgr.shutdown()
+
         if self._stop_event:
-            self._stop_event.set()
-        if self._serial_mgr and self._serial_mgr.data_serial:
-            try:
-                self._serial_mgr.data_serial.close()
-            except Exception:
-                pass
+            self._stop_event.set()  # 发出停止信号
+
         if self._io_thread:
-            self._io_thread.join(timeout=0.1)
-        if self._serial_mgr:
-            self._serial_mgr.close()
+            # timeout 应该稍微大于你 config 中设置的 DATA_TIMEOUT_SEC
+            # 假设 DATA_TIMEOUT_SEC 是 0.5，这里给 1.0 秒以保证线程能响应超时并退出
+            self._io_thread.join(timeout=1.0)
+
         self._current_mode.stop()
         self._start_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
@@ -389,9 +391,7 @@ class MainWindow(QMainWindow):
         # 3. 定义后台异步导出任务
         def export_task():
             try:
-                raw_data = self._current_mode.get_export_data()
-                import copy
-                data = copy.deepcopy(raw_data)  # 耗时操作放在子线程
+                data = self._current_mode.get_export_data()
 
                 if choice == tr("export_format_csv"):
                     if is_bp:

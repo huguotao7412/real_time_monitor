@@ -110,6 +110,7 @@ class HRMode(MonitorMode):
         self._bpm_history: list[tuple[float, float, float]] = []
         self._sqi_history: list[dict] = []
 
+
     # -- MonitorMode impl ------------------------------------------------
 
     @property
@@ -268,8 +269,8 @@ class HRMode(MonitorMode):
             "csv_rows": list(self._csv_rows),
             "breath_waveform_accum": list(self._breath_waveform_accum),
             "heart_waveform_accum": list(self._heart_waveform_accum),
-            "bpm_history": self._bpm_history,
-            "sqi_history": self._sqi_history,
+            "bpm_history": list(self._bpm_history),
+            "sqi_history": list(self._sqi_history),
             "latest_vitals": self._latest_vitals,
         }
 
@@ -291,6 +292,7 @@ class BPMode(MonitorMode):
         self._latest_bp_result = None  # type: ignore  # BPResult
         self._bp_results: deque = deque(maxlen=720)  # ~1 hour at 5 s/batch
         self._csv_rows: deque = deque(maxlen=3600)  # ~1 hour at 1 row/s
+
 
     # -- MonitorMode impl ------------------------------------------------
 
