@@ -375,9 +375,12 @@ class Pipeline:
             heart_wave = self._filter.filter_heart(enhanced)
 
         # BPM estimation: FFT breath + STFT heart (MATLAB PhaseProcess port)
+        heart_prominence = 0.1
         try:
-            breath_bpm, heart_bpm = estimate_bpm_stft(
-                breath_wave, heart_wave, FS_HZ,FFT_N_HEART, raw_displacement=displacement
+            breath_bpm, heart_bpm, heart_prominence = estimate_bpm_stft(
+                breath_wave, heart_wave, FS_HZ, FFT_N_HEART,
+                raw_displacement=displacement,
+                breath_waveform=breath_wave,
             )
         except Exception:
             breath_bpm, _ = estimate_bpm(
@@ -387,11 +390,11 @@ class Pipeline:
             if breath_bpm <= 0:
                 breath_bpm = estimate_breath_bpm_time_domain(breath_wave, FS_HZ)
             f0 = breath_bpm / 60.0 if breath_bpm > 0 else 0.0
-            heart_bpm, _ = estimate_bpm(
+            heart_bpm, heart_prominence = estimate_bpm(
                 heart_wave, FS_HZ, (0.8, 2.0), f0=f0
             )
 
-        return breath_wave, heart_wave, breath_bpm, heart_bpm
+        return breath_wave, heart_wave, breath_bpm, heart_bpm, heart_prominence
 
     def _shared_signal_chain(
             self, displacement: np.ndarray | None, update_bpm: bool
@@ -448,12 +451,12 @@ class Pipeline:
         if update_bpm:
             if self._use_advanced_dsp:
                 try:
-                    adv_breath, adv_heart, adv_breath_bpm, adv_heart_bpm = \
+                    adv_breath, adv_heart, adv_breath_bpm, adv_heart_bpm, adv_heart_prom = \
                         self._advanced_dsp_path(displacement)
                     breath_signal_display = adv_breath
                     heart_signal_display = adv_heart
                     breath_bpm = adv_breath_bpm
-                    heart_bpm = adv_heart_bpm
+                    heart_bpm_raw = adv_heart_bpm
 
                     # 中值去飞点 → Kalman 平滑 → EMA 稳显示
                     if breath_bpm > 0:
@@ -466,22 +469,45 @@ class Pipeline:
                                                            self._current_bin_snr)
                         self._last_valid_breath_bpm = breath_bpm
 
-                    if heart_bpm > 0:
-                        # Heart smoothing: either old median->kalman or new smoother
-                        if HEART_USE_NEW_SMOOTHER:
-                            self._heart_raw_history.append(heart_bpm)
-                            heart_bpm = apply_smoothing_chain(self._heart_smoother, heart_bpm,
-                                                              recent_phase_range, breath_power_ratio,
-                                                              self._current_bin_snr)
-                            self._last_valid_heart_bpm = heart_bpm
+                    if heart_bpm_raw > 0:
+                        # 记录 prominence 用于自适应 Kalman
+                        self._heart_prominence_history.append(adv_heart_prom)
+                        if len(self._heart_prominence_history) > HEART_KALMAN_HISTORY_MAXLEN * 2:
+                            self._heart_prominence_history = self._heart_prominence_history[-HEART_KALMAN_HISTORY_MAXLEN * 2:]
+
+                        # ── 异常跳变拒绝 (Outlier Rejection) ──
+                        # 比较当前 raw BPM 与上一帧后验估计; 若跳变过大且 prominence
+                        # 偏低, 拒绝该观测值, 仅依靠 Kalman 预测模型维持平滑过渡.
+                        heart_bpm_accepted = True
+                        if self._last_valid_heart_bpm > 0:
+                            bpm_jump = abs(heart_bpm_raw - self._last_valid_heart_bpm)
+                            if bpm_jump > 20.0 and adv_heart_prom < 0.3:
+                                # 低质量大跳变 → 拒绝观测, 保持上一帧估计
+                                heart_bpm_accepted = False
+
+                        if heart_bpm_accepted:
+                            # Heart smoothing: either old median->kalman or new smoother
+                            if HEART_USE_NEW_SMOOTHER:
+                                self._heart_raw_history.append(heart_bpm_raw)
+                                heart_bpm = apply_smoothing_chain(self._heart_smoother, heart_bpm_raw,
+                                                                  recent_phase_range, breath_power_ratio,
+                                                                  self._current_bin_snr)
+                                self._last_valid_heart_bpm = heart_bpm
+                            else:
+                                self._heart_raw_history.append(heart_bpm_raw)
+                                heart_bpm_raw_median = float(np.median(list(self._heart_raw_history)))
+                                self._heart_history.append(heart_bpm_raw_median)
+                                if len(self._heart_history) > HEART_KALMAN_HISTORY_MAXLEN:
+                                    self._heart_history = self._heart_history[-HEART_KALMAN_HISTORY_MAXLEN:]
+                                # 动态 Kalman: 传入 prominence 驱动自适应观测噪声
+                                prom_slice = self._heart_prominence_history[-len(self._heart_history):]
+                                heart_bpm = kalman_smooth(
+                                    self._heart_history, q=1e-3, r=0.5,
+                                    prominences=prom_slice)
+                                self._last_valid_heart_bpm = heart_bpm
                         else:
-                            self._heart_raw_history.append(heart_bpm)
-                            heart_bpm = float(np.median(list(self._heart_raw_history)))
-                            self._heart_history.append(heart_bpm)
-                            if len(self._heart_history) > HEART_KALMAN_HISTORY_MAXLEN:
-                                self._heart_history = self._heart_history[-HEART_KALMAN_HISTORY_MAXLEN:]
-                            heart_bpm = kalman_smooth(self._heart_history, q=1e-3, r=0.5)
-                            self._last_valid_heart_bpm = heart_bpm
+                            # 观测被拒绝: 维持上一帧有效值 (Kalman 预测延续)
+                            heart_bpm = self._last_valid_heart_bpm
                     self._cached_breath_wave = adv_breath
                     self._cached_heart_wave = adv_heart
                 except Exception:
@@ -509,20 +535,40 @@ class Pipeline:
                     heart_signal, FS_HZ, (0.8, 2.0), f0=f0
                 )
                 if heart_bpm_raw > 0:
-                    if HEART_USE_NEW_SMOOTHER:
-                        self._heart_raw_history.append(heart_bpm_raw)
-                        heart_bpm = apply_smoothing_chain(self._heart_smoother, heart_bpm_raw,
-                                                          recent_phase_range, breath_power_ratio,
-                                                          self._current_bin_snr)
-                        self._last_valid_heart_bpm = heart_bpm
+                    # 记录 prominence 用于自适应 Kalman
+                    self._heart_prominence_history.append(prominence)
+                    if len(self._heart_prominence_history) > HEART_KALMAN_HISTORY_MAXLEN * 2:
+                        self._heart_prominence_history = self._heart_prominence_history[-HEART_KALMAN_HISTORY_MAXLEN * 2:]
+
+                    # ── 异常跳变拒绝 (Outlier Rejection) ──
+                    heart_bpm_accepted = True
+                    if self._last_valid_heart_bpm > 0:
+                        bpm_jump = abs(heart_bpm_raw - self._last_valid_heart_bpm)
+                        if bpm_jump > 20.0 and prominence < 0.3:
+                            heart_bpm_accepted = False
+
+                    if heart_bpm_accepted:
+                        if HEART_USE_NEW_SMOOTHER:
+                            self._heart_raw_history.append(heart_bpm_raw)
+                            heart_bpm = apply_smoothing_chain(self._heart_smoother, heart_bpm_raw,
+                                                              recent_phase_range, breath_power_ratio,
+                                                              self._current_bin_snr)
+                            self._last_valid_heart_bpm = heart_bpm
+                        else:
+                            self._heart_raw_history.append(heart_bpm_raw)
+                            heart_bpm_raw_median = float(np.median(list(self._heart_raw_history)))
+                            self._heart_history.append(heart_bpm_raw_median)
+                            if len(self._heart_history) > HEART_KALMAN_HISTORY_MAXLEN:
+                                self._heart_history = self._heart_history[-HEART_KALMAN_HISTORY_MAXLEN:]
+                            # 动态 Kalman: 传入 prominence 驱动自适应观测噪声
+                            prom_slice = self._heart_prominence_history[-len(self._heart_history):]
+                            heart_bpm = kalman_smooth(
+                                self._heart_history, q=1e-3, r=0.5,
+                                prominences=prom_slice)
+                            self._last_valid_heart_bpm = heart_bpm
                     else:
-                        self._heart_raw_history.append(heart_bpm_raw)
-                        heart_bpm = float(np.median(list(self._heart_raw_history)))
-                        self._heart_history.append(heart_bpm)
-                        if len(self._heart_history) > 10:
-                            self._heart_history = self._heart_history[-10:]
-                        heart_bpm = kalman_smooth(self._heart_history, q=1e-3, r=0.5)
-                        self._last_valid_heart_bpm = heart_bpm
+                        # 观测被拒绝: 维持上一帧有效值
+                        heart_bpm = self._last_valid_heart_bpm
 
             self._last_bpm_update = self._frame_count
 

@@ -1,4 +1,7 @@
-"""BPM 估计 — 混合 FFT + 时域峰值检测 (MATLAB breath_test.m + PhaseProcess.m)"""
+"""BPM 估计 — 混合 FFT + 时域峰值检测 (MATLAB breath_test.m + PhaseProcess.m)
+
+v2.1: RLS ANC 自适应谐波抵消 + Viterbi 脊线提取 + 动态 Kalman
+"""
 
 import numpy as np
 import warnings
@@ -8,6 +11,7 @@ from config.protocol import (
     BREATH_TIME_SAVGOL_SEC, BREATH_PEAK_PROMINENCE_RATIO, BREATH_BPM_MIN, BREATH_BPM_MAX,
     STFT_MIN_WINDOW_SEC, STFT_WINDOW_RATIO, STFT_OVERLAP_RATIO
 )
+from dsp_pipeline.rls_anc import RLSANC
 
 
 def estimate_bpm(
@@ -246,15 +250,29 @@ def estimate_bpm_stft(
     fs: float = FS_HZ,
     n_fft: int = FFT_N_HEART,
     raw_displacement: np.ndarray = None,
-) -> tuple[float, float]:
-    """Breath: unbiased autocorrelation + time-domain fallback.
-    Heart: STFT ridge -> Kalman -> trim -> min(STFT, FFT).
+    breath_waveform: np.ndarray = None,
+) -> tuple[float, float, float]:
+    """Breath: 时域峰值法 + 谱估计回退.
+    Heart: RLS ANC → STFT + Viterbi 脊线 → Kalman → trim → min(STFT, FFT).
+
+    Args:
+        breath_signal: SOS 滤波后的呼吸信号
+        heart_signal: SOS 滤波后的心跳信号 (受呼吸谐波污染)
+        fs: 采样率 (Hz)
+        n_fft: FFT 点数
+        raw_displacement: 原始位移信号 (用于呼吸时域估计)
+        breath_waveform: 呼吸时域波形 (用于 RLS ANC 参考噪声).
+                         若为 None, 使用 breath_signal 作为参考.
+
+    Returns:
+        (breath_bpm, heart_bpm, heart_prominence_norm)
+        - heart_prominence_norm: 心跳 STFT 脊线质量 [0.1, 1.0]
     """
     from scipy.signal import stft
 
     n = len(breath_signal)
     if n < 64:
-        return 0.0, 0.0
+        return 0.0, 0.0, 0.0
 
     # --- Breath: 优先使用时域峰值法（针对平滑正弦波更精确） ---
     sig_for_time = raw_displacement if raw_displacement is not None else breath_signal
@@ -265,29 +283,42 @@ def estimate_bpm_stft(
         breath_bpm, _ = estimate_bpm(breath_signal, fs, (0.1, 0.8), n_fft=FFT_N_BREATH,
                                      enable_subharmonic_rescue=True)
 
+    # --- RLS ANC: 自适应呼吸谐波抵消 ---
+    # 使用呼吸时域波形作为参考噪声，从心跳信号中自适应消除谐波成分
+    ref_noise = breath_waveform if breath_waveform is not None else breath_signal
+    try:
+        anc = RLSANC(filter_order=32, forgetting_factor=0.995, delta=100.0)
+        heart_clean = anc.filter(heart_signal, ref_noise)
+    except Exception:
+        # ANC 失败时回退到原始信号
+        heart_clean = heart_signal
+
     # --- Heart STFT (MATLAB: 25% hamming, 80% overlap) ---
     window_sec = n / fs
+    heart_prominence = 0.1
     if window_sec < STFT_MIN_WINDOW_SEC:
-            # 短窗口下，强制 STFT 输出失效，依赖下方的高精度 FFT
-            heart_bpm_stft = 0.0
+        # 短窗口下，强制 STFT 输出失效，依赖下方的高精度 FFT
+        heart_bpm_stft = 0.0
     else:
         heart_win = max(64, int(n * STFT_WINDOW_RATIO))
         heart_overlap = int(heart_win * STFT_OVERLAP_RATIO)
         nfft_h = max(n_fft, 2 ** int(np.ceil(np.log2(heart_win))))
 
         f_h, t_h, Zxx_h = stft(
-            heart_signal, fs, window='hamming', nperseg=heart_win,
+            heart_clean, fs, window='hamming', nperseg=heart_win,
             noverlap=heart_overlap, nfft=nfft_h,
         )
         mag_h = np.abs(Zxx_h)
 
         f0 = breath_bpm / 60.0 if breath_bpm > 0 else 0.0
 
-        heart_bpm_stft = _extract_bpm_from_stft(f_h, mag_h, (0.8, 2.5), 'heart',f0=f0)
+        heart_bpm_stft, heart_prominence = _extract_bpm_from_stft(
+            f_h, mag_h, (0.8, 2.5), 'heart', f0=f0)
 
     # FFT fallback for heart: upper bound (MATLAB: 1.0-2.5 Hz)
     f0 = breath_bpm / 60.0 if breath_bpm > 0 else 0.0
-    heart_fft_bpm, _ = estimate_bpm(heart_signal, fs, (0.8, 2.5), f0=f0,n_fft=FFT_N_BREATH)
+    heart_fft_bpm, heart_fft_prom = estimate_bpm(
+        heart_clean, fs, (0.8, 2.5), f0=f0, n_fft=FFT_N_BREATH)
 
     if heart_bpm_stft > 0 and heart_fft_bpm > 0:
         heart_bpm = min(heart_bpm_stft, heart_fft_bpm)
@@ -295,8 +326,9 @@ def estimate_bpm_stft(
         heart_bpm = heart_bpm_stft
     else:
         heart_bpm = heart_fft_bpm
+        heart_prominence = heart_fft_prom
 
-    return breath_bpm, heart_bpm
+    return breath_bpm, heart_bpm, heart_prominence
 
 
 def _extract_bpm_from_stft(
@@ -305,56 +337,65 @@ def _extract_bpm_from_stft(
     freq_band: tuple[float, float],
     signal_type: str = 'breath',
     f0: float = 0.0,
-) -> float:
-    """Extract BPM from STFT magnitude via ridge extraction + Kalman filter.
+) -> tuple[float, float]:
+    """Extract BPM from STFT magnitude via Viterbi ridge + Kalman filter.
 
-    MATLAB: extract_raw_trace + kalman_filter_trace.
+    改进了原始 MATLAB extract_raw_trace + kalman_filter_trace:
+    - 使用 Viterbi 动态规划替代逐帧 argmax, 保持频率轨迹的时间连续性
+    - 移除了硬编码谐波掩膜 (mag_roi[harm_mask] *= 0.1), 改用 RLS ANC 预处理
+    - 返回 prominence 用于下游自适应 Kalman 滤波
 
     Args:
         frequencies: STFT frequency axis (Hz).
         magnitude: STFT magnitude matrix [n_freqs, n_times].
         freq_band: (lo, hi) frequency range for ridge search.
-        signal_type: 'breath' or 'heart' (affects Kalman Q/R).
+        signal_type: 'breath' or 'heart' (affects Kalman Q/R and Viterbi gamma).
+        f0: 呼吸基频 (保留参数, 不再用于硬掩膜, 仅传递到 trace 供参考)
 
     Returns:
-        BPM value, or 0.0 on failure.
+        (bpm, prominence_norm) — BPM value and ridge quality [0.1, 1.0]
     """
     f_lo, f_hi = freq_band
     mask = (frequencies >= f_lo) & (frequencies <= f_hi)
 
     if not np.any(mask):
-        return 0.0
+        return 0.0, 0.1
 
     f_roi = frequencies[mask]
     mag_roi = magnitude[mask, :]
 
-    if signal_type == 'heart' and f0 > 0.1:
-        for h in range(2, 6):  # 遍历 2 到 5 次呼吸谐波
-            harmonic_freq = f0 * h
-            if freq_band[0] <= harmonic_freq <= freq_band[1]:
-                # 将谐波附近 ±15% 的能量衰减到 10%
-                harm_mask = (f_roi >= harmonic_freq * 0.85) & (f_roi <= harmonic_freq * 1.15)
-                mag_roi[harm_mask, :] *= 0.1
+    # ── 注: 不再执行硬编码谐波掩膜 ──
+    # 谐波抑制已由上游 RLS ANC (estimate_bpm_stft) 自适应完成,
+    # 避免在频域"挖洞"导致真实心率与呼吸谐波重合时被误杀.
 
     if mag_roi.shape[1] < 2:
-        return 0.0
+        # 单帧: 退化为 argmax
+        if mag_roi.shape[1] == 1:
+            best_idx = np.argmax(mag_roi[:, 0])
+            return float(f_roi[best_idx]) * 60.0, 0.5
+        return 0.0, 0.1
 
-    # Ridge extraction: max magnitude per time column
-    max_indices = np.argmax(mag_roi, axis=0)
-    trace_hz = f_roi[max_indices]
+    # Ridge extraction: Viterbi 动态规划替代逐帧 argmax
+    # gamma 控制频率跳变惩罚; 心跳需要更强的时间连续性 (心率不应突变)
+    if signal_type == 'heart':
+        viterbi_gamma = 80.0  # 强平滑: 心率轨迹应是连续的
+    else:
+        viterbi_gamma = 30.0  # 呼吸允许稍大波动
+
+    trace_hz = _viterbi_ridge(mag_roi, f_roi, gamma=viterbi_gamma)
 
     # 呼吸: 每列智能半频检测，使用 find_peaks 识别真实局部峰值
     # 解决二次谐波能量强于基频的经典问题
     if signal_type == 'breath':
         for t in range(len(trace_hz)):
             pf = trace_hz[t]
-            p_mag = mag_roi[max_indices[t], t]
+            p_mag = mag_roi[np.argmin(np.abs(f_roi - pf)), t]
             hf = pf / 2.0
 
             if hf >= f_lo:
-                mask = (f_roi >= hf * 0.8) & (f_roi <= hf * 1.2)
-                if np.any(mask):
-                    indices = np.where(mask)[0]
+                mask_half = (f_roi >= hf * 0.8) & (f_roi <= hf * 1.2)
+                if np.any(mask_half):
+                    indices = np.where(mask_half)[0]
                     half_col = mag_roi[indices, t]
                     from scipy.signal import find_peaks
                     half_peaks, _ = find_peaks(half_col)
@@ -364,6 +405,24 @@ def _extract_bpm_from_stft(
                         ratio = mag_roi[best_idx, t] / (p_mag + 1e-10)
                         if ratio > 0.2 and f_roi[best_idx] >= f_lo:
                             trace_hz[t] = f_roi[best_idx]
+
+    # --- 计算脊线 prominence (用于下游自适应 Kalman) ---
+    # 基于: (a) 脊线上各帧的能量相对于该帧总能量的比值
+    #       (b) 脊线频率方差 (方差越小, 轨迹越稳定, 质量越高)
+    ridge_energy_ratio = np.zeros(len(trace_hz))
+    for t in range(len(trace_hz)):
+        col = mag_roi[:, t]
+        col_total = np.sum(col) + 1e-12
+        ridge_idx = np.argmin(np.abs(f_roi - trace_hz[t]))
+        ridge_energy_ratio[t] = col[ridge_idx] / col_total
+
+    mean_energy_ratio = float(np.mean(ridge_energy_ratio))
+    # 频率变异系数 (归一化到频带范围)
+    freq_cv = float(np.std(trace_hz) / (f_hi - f_lo + 1e-6))
+    # prominence: 能量集中度高 + 频率稳定 = 高质量
+    energy_score = min(1.0, mean_energy_ratio * 5.0)  # 20% 能量 → score 1.0
+    stability_score = max(0.0, 1.0 - freq_cv * 20.0)   # CV=0.05 → score 0.0
+    prominence_norm = max(0.1, min(1.0, 0.6 * energy_score + 0.4 * stability_score))
 
     # Kalman filter the trace
     if signal_type == 'breath':
@@ -380,9 +439,80 @@ def _extract_bpm_from_stft(
             kf_trimmed = sorted_kf[:-4]
         else:
             kf_trimmed = sorted_kf
-        return float(np.mean(kf_trimmed)) * 60.0
+        return float(np.mean(kf_trimmed)) * 60.0, prominence_norm
     else:
-        return float(np.mean(kf_trace)) * 60.0
+        return float(np.mean(kf_trace)) * 60.0, prominence_norm
+
+
+def _viterbi_ridge(
+    mag_roi: np.ndarray,
+    f_roi: np.ndarray,
+    gamma: float = 50.0,
+) -> np.ndarray:
+    """使用 Viterbi 动态规划提取 STFT 频谱中最优频率脊线。
+
+    相比逐帧 argmax, Viterbi 考虑相邻时间帧之间的频率转移代价,
+    能够在呼吸谐波瞬时能量超过心跳时保持锁定在真实心率轨迹上。
+
+    动态规划递推式:
+        cost[t, i] = emission[t, i] + max_j { cost[t-1, j] - gamma * |f_i - f_j| }
+    其中 emission[t, i] = log(mag_roi[i, t] / max(mag_roi) + eps)
+
+    Args:
+        mag_roi: STFT 幅度矩阵 [n_freqs, n_times]
+        f_roi: ROI 频率轴 (Hz) [n_freqs]
+        gamma: 转移惩罚系数 (Hz⁻¹), 越大轨迹越平滑.
+               heartbeat: 80, breath: 30
+
+    Returns:
+        trace_hz: 每个时间帧的最优频率估计 (Hz), 形状 [n_times]
+    """
+    n_freqs, n_times = mag_roi.shape
+
+    if n_times < 2:
+        if n_times == 1:
+            best_idx = np.argmax(mag_roi[:, 0])
+            return np.array([f_roi[best_idx]])
+        return np.array([])
+
+    # 发射概率: 对数幅度 (归一化以避免数值下溢)
+    mag_max = np.max(mag_roi)
+    if mag_max < 1e-12:
+        emission = np.zeros((n_freqs, n_times), dtype=np.float64)
+    else:
+        # 裁剪负值 (数值噪声可能导致极小负值)
+        mag_clipped = np.maximum(mag_roi, 1e-15)
+        emission = np.log(mag_clipped / mag_max)
+
+    # 频率差平方矩阵 (用于转移代价计算)
+    # f_diff_sq[i, j] = (f_i - f_j)²
+    f_diff = f_roi[:, np.newaxis] - f_roi[np.newaxis, :]
+    f_diff_sq = f_diff * f_diff
+
+    # 前向累积代价矩阵
+    cost = np.zeros((n_freqs, n_times), dtype=np.float64)
+    path = np.zeros((n_freqs, n_times), dtype=np.int32)
+
+    # 初始化: 第一帧无转移代价
+    cost[:, 0] = emission[:, 0]
+
+    # 前向动态规划
+    for t in range(1, n_times):
+        # transition[i, j] = cost[j, t-1] - gamma * (f_i - f_j)²
+        # 平方惩罚: 小漂移 (~0.02 Hz) 代价极小, 大跳变 (~0.2 Hz) 代价巨大
+        # 广播: cost_prev 形状 [1, n_freqs], f_diff_sq 形状 [n_freqs, n_freqs]
+        transition = cost[np.newaxis, :, t - 1] - gamma * f_diff_sq  # [n_freqs, n_freqs]
+        cost[:, t] = emission[:, t] + np.max(transition, axis=1)
+        path[:, t] = np.argmax(transition, axis=1)
+
+    # 后向追踪最优路径
+    trace_indices = np.zeros(n_times, dtype=np.int32)
+    trace_indices[-1] = np.argmax(cost[:, -1])
+
+    for t in range(n_times - 2, -1, -1):
+        trace_indices[t] = path[trace_indices[t + 1], t + 1]
+
+    return f_roi[trace_indices]
 
 
 def _detrend_cubic(signal: np.ndarray) -> np.ndarray:
