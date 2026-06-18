@@ -75,7 +75,7 @@ def emd_harmonic_clean(
     if len(resp_candidates) == 0:
         return signal.copy()
 
-    valid_corrs = imf_corrs[resp_candidates]
+    valid_corrs = np.abs(imf_corrs[resp_candidates])
     max_corr = np.max(valid_corrs)
     strong = resp_candidates[valid_corrs > max_corr * 0.7]
     best_idx = strong[np.argmin(imf_freqs[strong])]

@@ -268,7 +268,7 @@ class BPPipeline:
         if target_bin is None:
             if n_valid >= BP_CFAR_INITIAL_FRAMES and n_valid % BP_CFAR_INTERVAL == 0:
                 self._trigger_inference()
-            elif target_bin is None and n_valid >= BP_CFAR_FALLBACK_FRAMES:
+            elif n_valid >= BP_CFAR_FALLBACK_FRAMES and n_valid % BP_CFAR_INTERVAL == 0:
                 self._trigger_inference()
             return
 
@@ -395,6 +395,8 @@ class BPPipeline:
             )
             if len(candidates) > 0:
                 target_bin = int(candidates[0])
+                if tracker_state == TrackerState.LOST:
+                    self._tracker.reset()
                 self._tracker.update(float(target_bin))
                 real_dist = max(
                     MIN_REAL_DISTANCE_M,
@@ -489,7 +491,8 @@ class BPPipeline:
             new_phase = np.angle(
                 new_complex[np.argmax(np.abs(new_complex))]
             )
-            phase_offset = old_phase - new_phase
+            raw_diff = np.angle(np.exp(1j * (old_phase - new_phase)))
+            phase_offset = raw_diff * FREQ_SCALE_60G_TO_24G
             print(
                 f"[BPPipeline] Phase alignment: offset={phase_offset:.4f} rad"
                 f" (bin {target_bin} → {new_target_bin})"
