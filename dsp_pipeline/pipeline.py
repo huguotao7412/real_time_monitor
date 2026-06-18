@@ -193,8 +193,7 @@ class Pipeline:
                     MIN_NEW_TARGET_SNR = 12.0
                     if new_snr > MIN_NEW_TARGET_SNR and (
                             current_actual_snr < 5.0 or new_snr > current_actual_snr * CFAR_SNR_UPDATE_RATIO):
-                        print(
-                            f"[DSP] Target moved! Range updated to bin: {new_bin} (SNR: {new_snr:.1f} vs Old: {current_actual_snr:.1f})")
+                        print(f"[DSP] Target moved! Range updated to bin: {new_bin} ...")
                         self._best_bin = new_bin
                         self._current_bin_snr = new_snr
 

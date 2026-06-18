@@ -302,9 +302,11 @@ class BPPipeline:
 
         try:
             self._inference_queue.put_nowait(payload)
-            self._last_inference_frame = self._frame_count
         except queue.Full:
             pass  # worker is busy — drop this batch, pick up next cycle
+        finally:
+            # 无论推流是否成功，都必须更新游标，严格维持 STEP_FRAMES 的滑动步长
+            self._last_inference_frame = self._frame_count
 
     # ------------------------------------------------------------------
     # Ring-buffer read helpers
