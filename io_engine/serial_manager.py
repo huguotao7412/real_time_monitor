@@ -38,9 +38,10 @@ class SerialManager:
 
     def send_command(self, cmd: str) -> None:
         """向控制口发送命令字符串"""
-        if self.control_serial and self.control_serial.is_open:
-            self.control_serial.write((cmd + "\r\n").encode())
-            self.control_serial.flush()
+        with self._lock:
+            if self.control_serial and self.control_serial.is_open:
+                self.control_serial.write((cmd + "\r\n").encode())
+                self.control_serial.flush()
 
     def read_data(self, size: int = DATA_READ_SIZE) -> bytes:
         """从数据口读取字节"""

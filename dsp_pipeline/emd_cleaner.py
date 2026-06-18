@@ -62,7 +62,8 @@ def emd_harmonic_clean(
             imf_freqs[i] = freqs[idx]
 
             corr_mat = np.corrcoef(sig_col, imf)
-            imf_corrs[i] = corr_mat[0, 1]
+            val = corr_mat[0, 1]
+            imf_corrs[i] = val if not np.isnan(val) else 0.0
         except Exception:
             imf_freqs[i] = 0.0
             imf_corrs[i] = 0.0
@@ -78,6 +79,8 @@ def emd_harmonic_clean(
     valid_corrs = np.abs(imf_corrs[resp_candidates])
     max_corr = np.max(valid_corrs)
     strong = resp_candidates[valid_corrs > max_corr * 0.7]
+    if len(strong) == 0:
+        return signal.copy()
     best_idx = strong[np.argmin(imf_freqs[strong])]
     f_rr = imf_freqs[best_idx]
 

@@ -480,7 +480,7 @@ class BPPipeline:
         # of the full 5 s cold restart.
         # ================================================================
         phase_offset = 0.0
-        if new_target_bin != target_bin and self._last_phase_ref is not None:
+        if target_bin is not None and new_target_bin != target_bin and self._last_phase_ref is not None:
             ref_bin, _ref_phase = self._last_phase_ref
             # extract phase at the *same* latest frame for both bins
             old_complex = mean_bin_frame_rx[target_bin, -1, :]
