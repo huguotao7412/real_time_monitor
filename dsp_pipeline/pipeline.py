@@ -197,10 +197,6 @@ class Pipeline:
                             f"[DSP] Target moved! Range updated to bin: {new_bin} (SNR: {new_snr:.1f} vs Old: {current_actual_snr:.1f})")
                         self._best_bin = new_bin
                         self._current_bin_snr = new_snr
-                        self._phase_buffer.clear()
-                        self._rx_buffer.clear()
-                        self._last_unwrapped_phase = None
-
 
         # 2. Extract per-RX complex data and buffer
         rx_complex = None

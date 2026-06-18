@@ -283,6 +283,8 @@ class MainWindow(QMainWindow):
 
         # 1. Stop current I/O safely
         if was_running:
+            if self._radar_mgr:
+                self._radar_mgr.shutdown()
             self._running = False
             if self._stop_event:
                 self._stop_event.set()
@@ -291,8 +293,6 @@ class MainWindow(QMainWindow):
 
         # 2. Stop pipeline + shutdown radar
         self._current_mode.stop()
-        if self._radar_mgr:
-            self._radar_mgr.shutdown()
 
         # 3. Swap mode
         was_bp = isinstance(self._current_mode, BPMode)
@@ -343,10 +343,10 @@ class MainWindow(QMainWindow):
             self._status_label.setStyleSheet("color: #f39c12;")
 
     def _on_stop(self) -> None:
-        self._running = False
-
         if self._radar_mgr:
             self._radar_mgr.shutdown()
+
+        self._running = False
 
         if self._stop_event:
             self._stop_event.set()  # 发出停止信号
@@ -430,16 +430,12 @@ class MainWindow(QMainWindow):
                     export_edf(path, breath, heart, fs=20.0)
 
                 # 4. 导出成功，通过单次定时器安全地切回主线程进行弹窗
-                QMetaObject.invokeMethod(self, "_on_save_success",
-                                         Qt.ConnectionType.QueuedConnection,
-                                         Q_ARG(str, path))
+                QTimer.singleShot(0, lambda: self._on_save_success(path))
 
             except Exception as e:
                 # 导出失败，同样切回主线程弹窗报错
                 error_msg = str(e)
-                QMetaObject.invokeMethod(self, "_on_save_error",
-                                         Qt.ConnectionType.QueuedConnection,
-                                         Q_ARG(str, error_msg))
+                QTimer.singleShot(0, lambda: self._on_save_error(error_msg))
 
         # 启动后台守护线程执行保存任务
         threading.Thread(target=export_task, daemon=True).start()
