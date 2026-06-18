@@ -46,7 +46,16 @@ class FrameSyncFSM:
             del self._buffer[:idx]
 
         # State 2: Parse header
-        header, consumed = self._parse_uart_header(self._buffer)
+        # 【修改点 1】：接收三个返回值 (增加 skip_bytes)
+        header, consumed, skip_bytes = self._parse_uart_header(self._buffer)
+
+        # 【修改点 2】：如果明确这是一个不想要的完整包，整体跳过它！
+        if skip_bytes > 0:
+            if len(self._buffer) >= skip_bytes:
+                # 只有当缓冲区里的数据已经接收完整这个垃圾包时，才一次性全部删掉
+                del self._buffer[:skip_bytes]
+            return None, None # 如果长度还不够这个垃圾包的总长，继续等待数据收满
+
         if header is None:
             del self._buffer[:1]  # Skip one byte and re-seek
             return None, None
@@ -64,17 +73,17 @@ class FrameSyncFSM:
 
         return header, raw_payload
 
-    def _parse_uart_header(self, data: bytearray) -> tuple[FrameHeader | None, int]:
-        """解析 UART 包头。返回 (FrameHeader, consumed_bytes)
-        consumed_bytes = PacketHeader + PayloadHeader，即 payload 实际开始的位置
+    def _parse_uart_header(self, data: bytearray) -> tuple[FrameHeader | None, int, int]:
+        """解析 UART 包头。返回 (FrameHeader, consumed_bytes, skip_bytes)
+        skip_bytes 用于指示如果这是一个合法的但不需处理的包，外层应该直接跳过多少字节。
         """
         if len(data) < self.MIN_PACKET_SIZE:
-            return None, 0
+            return None, 0, 0
 
         try:
             magic = data[0:4]
             if magic != FRAME_MAGIC:
-                return None, 0
+                return None, 0, 0
 
             msg_id = data[4]
             # 假设 PacketLen 在 data[5:7], uint16 LE (待验证: 也可能是 uint32 在 data[5:9])
@@ -85,7 +94,6 @@ class FrameSyncFSM:
                 ph = self.PACKET_HEADER_SIZE  # payload header offset
                 frame_index = struct.unpack_from("<I", data, ph)[0]
                 frame_length = struct.unpack_from("<I", data, ph + 4)[0]  # DWORD 数
-                # data_offset = struct.unpack_from("<I", data, ph + 8)[0]  # 分片拼接用
 
                 # FFT Bin 数据紧跟在 Payload Header 之后
                 self._payload_target = frame_length * 4  # DWORD → bytes
@@ -104,13 +112,18 @@ class FrameSyncFSM:
                     max_velocity_cm_s=0,
                     velocity_resol_mm_s=0,
                 )
-                return header, total_hdr
+                return header, total_hdr, 0
             else:
-                # 点云 / 目标数据: 跳过整个 packet
-                self._payload_target = packet_len
-                return None, self.PACKET_HEADER_SIZE
+                # 【核心修复部分】
+                # 点云 / 目标数据: 这不是我们要的 FFT 数据
+                # 计算出整个非目标数据包的总长度 = 包头长度 + Payload长度
+                total_skip_size = self.PACKET_HEADER_SIZE + packet_len
+
+                # 返回 None (无合法 FFT 头), 0 (不用于消费), total_skip_size (让外层直接砍掉这么多字节)
+                return None, 0, total_skip_size
+
         except struct.error:
-            return None, 0
+            return None, 0, 0
 
     def reset(self) -> None:
         self._buffer.clear()

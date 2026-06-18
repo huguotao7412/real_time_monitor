@@ -30,6 +30,8 @@ from ui.monitor_mode import MonitorMode, HRMode, BPMode
 
 class MainWindow(QMainWindow):
     _start_research_signal = pyqtSignal()
+    _export_success_signal = pyqtSignal(str)
+    _export_error_signal = pyqtSignal(str)
     def __init__(self, bp_mode: bool = False):
         super().__init__()
         self.setWindowTitle(tr("window_title"))
@@ -59,6 +61,8 @@ class MainWindow(QMainWindow):
         self._setup_ui()
         self._setup_timers()
         self._start_research_signal.connect(self._research_tab.start)
+        self._export_success_signal.connect(self._on_save_success)
+        self._export_error_signal.connect(self._on_save_error)
 
     def _setup_ui(self) -> None:
         # Menu bar with language switch
@@ -281,66 +285,36 @@ class MainWindow(QMainWindow):
         """Hot-switch between HR and BP monitoring modes (serial only)."""
         was_running = self._running
 
-        # 1. Stop current I/O safely
+        # 1. 停止当前所有活动 (复用已有的安全关闭逻辑)
         if was_running:
-            if self._radar_mgr:
-                self._radar_mgr.shutdown()
-            self._running = False
-            if self._stop_event:
-                self._stop_event.set()
-            if self._io_thread:
-                self._io_thread.join(timeout=1.0) # 等待 IO 线程自身干净地结束并关闭串口
+            self._on_stop()
+        else:
+            self._current_mode.stop()
 
-        # 2. Stop pipeline + shutdown radar
-        self._current_mode.stop()
-
-        # 3. Swap mode
+        # 2. Swap mode
         was_bp = isinstance(self._current_mode, BPMode)
         self._current_mode = HRMode() if was_bp else BPMode()
 
-        # 4. Rebuild UART parser for new mode
+        # 3. Rebuild UART parser for new mode
         self._uart_parser = UartParser(bins_per_frame=self._current_mode.uart_bins)
 
-        # 5. Update UI
+        # 4. Update UI
         self._update_tab_visibility()
         self._mode_btn.setText(
             tr("btn_mode_hr") if isinstance(self._current_mode, BPMode)
             else tr("btn_mode_bp")
         )
 
-        # 6. Reset inactive tabs to "--"
+        # 5. Reset inactive tabs to "--"
         if was_bp:
             self._bp_tab.reset_display()
         else:
             self._subject_tab.reset_display()
             self._research_tab.reset_display()
 
-        # 7. Restart if was running
+        # 6. 重新启动 (复用已有的完整启动与端口重连逻辑)
         if was_running:
-            # Re-open data port
-            try:
-                self._serial_mgr.open_data(
-                    self._serial_mgr.data_port,
-                    baudrate=self._radar_mgr.data_baudrate,
-                )
-            except Exception:
-                pass
-            self._current_mode.boot_radar(self._radar_mgr)
-            self._current_mode.start()
-            self._current_mode.clear_data()
-            self._running = True
-            self._stop_event = threading.Event()
-            self._uart_parser.reset()
-            self._frame_count = 0
-            self._start_time = time.time()
-            self._io_thread = threading.Thread(
-                target=self._serial_io_loop, daemon=True)
-            self._io_thread.start()
-            self._status_label.setText("● Capturing")
-            self._status_label.setStyleSheet("color: #27ae60;")
-        else:
-            self._status_label.setText(tr("status_standby"))
-            self._status_label.setStyleSheet("color: #f39c12;")
+            self._start_serial()
 
     def _on_stop(self) -> None:
         if self._radar_mgr:
@@ -430,12 +404,12 @@ class MainWindow(QMainWindow):
                     export_edf(path, breath, heart, fs=20.0)
 
                 # 4. 导出成功，通过单次定时器安全地切回主线程进行弹窗
-                QTimer.singleShot(0, lambda: self._on_save_success(path))
+                self._export_success_signal.emit(path)
 
             except Exception as e:
                 # 导出失败，同样切回主线程弹窗报错
                 error_msg = str(e)
-                QTimer.singleShot(0, lambda: self._on_save_error(error_msg))
+                self._export_error_signal.emit(error_msg)
 
         # 启动后台守护线程执行保存任务
         threading.Thread(target=export_task, daemon=True).start()
