@@ -304,9 +304,14 @@ class MainWindow(QMainWindow):
         """Hot-switch between HR and BP monitoring modes (serial only)."""
         was_running = self._running
 
-        # 1. 停止当前所有活动 (复用已有的安全关闭逻辑)
+        self._mode_btn.setEnabled(False)
+
+        # 1. 停止当前所有活动
         if was_running:
             self._on_stop()
+            # 【修复点】：强制确保旧的 IO 线程彻底退出并释放串口，避免 Access Denied
+            if self._io_thread and self._io_thread.is_alive():
+                self._io_thread.join(timeout=2.0)
         else:
             self._current_mode.stop()
 
@@ -331,9 +336,11 @@ class MainWindow(QMainWindow):
             self._subject_tab.reset_display()
             self._research_tab.reset_display()
 
-        # 6. 重新启动 (复用已有的完整启动与端口重连逻辑)
+        # 6. 重新启动
         if was_running:
             self._start_serial()
+        else:
+            self._mode_btn.setEnabled(True)  # 若没在运行，马上恢复按钮
 
     def _on_stop(self) -> None:
         if self._radar_mgr:

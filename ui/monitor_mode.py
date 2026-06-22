@@ -16,7 +16,7 @@ from dsp_pipeline.vital_signs import VitalSigns
 from dsp_pipeline.strategies import (
     SignalCleanerStrategy, VitalSignSeparator,
     VMDRLSCleaner, EMDHarmonicCleaner, PassthroughCleaner,
-    WPDSeparator, SOSFilterSeparator,
+    WPDSeparator, SOSFilterSeparator, EMDPulseCleaner,
 )
 from utils.benchmark_logger import AlgorithmBenchmarker
 
@@ -495,23 +495,39 @@ class BPMode(MonitorMode):
         if self._pipeline is None:
             return
 
+        new_result = False
         try:
             while not self._pipeline.display_queue.empty():
                 self._latest_bp_result = self._pipeline.display_queue.get_nowait()
+                new_result = True
         except queue.Empty:
             pass
 
         if self._latest_bp_result is not None:
             r = self._latest_bp_result
-            bp_tab.update_display(r)
-            self._bp_results.append(r)
 
-            # Update research tab with BP telemetry
+            # 【修复点】：只有在获取到新结果时，才更新图表和追加记录
+            if new_result:
+                bp_tab.update_display(r)
+                self._bp_results.append(r)
+
+                # Record valid BP readings for export
+                if not np.isnan(r.sbp):
+                    self._csv_rows.append({
+                        "Timestamp": datetime.now().isoformat(),
+                        "FrameIndex": r.frame_index,
+                        "SBP": round(r.sbp, 2),
+                        "DBP": round(r.dbp, 2),
+                        "Distance_m": round(r.target_distance_m, 2),
+                        "Confidence": round(r.quality.get("confidence", 0.0), 4) if r.quality else 0.0,
+                    })
+
+            # Research tab 和 telemetry 可以继续每帧刷新
             dsp_telemetry = self.get_dsp_telemetry()
             benchmark_elapsed = self.get_benchmark_elapsed()
             research_tab.update_display(
-                breath_bpm=0.0,  # BP mode doesn't compute breath BPM
-                heart_bpm=0.0,   # BP mode doesn't compute heart BPM
+                breath_bpm=0.0,
+                heart_bpm=0.0,
                 breath_waveform=np.array([]),
                 heart_waveform=np.array([]),
                 quality=r.quality,
@@ -519,17 +535,6 @@ class BPMode(MonitorMode):
                 dsp_telemetry=dsp_telemetry,
                 benchmark_elapsed=benchmark_elapsed,
             )
-
-            # Record valid BP readings for export
-            if not np.isnan(r.sbp):
-                self._csv_rows.append({
-                    "Timestamp": datetime.now().isoformat(),
-                    "FrameIndex": r.frame_index,
-                    "SBP": round(r.sbp, 2),
-                    "DBP": round(r.dbp, 2),
-                    "Distance_m": round(r.target_distance_m, 2),
-                    "Confidence": round(r.quality.get("confidence", 0.0), 4) if r.quality else 0.0,
-                })
 
             status_label.setText("● Monitoring")
             status_label.setStyleSheet("color: #27ae60;")

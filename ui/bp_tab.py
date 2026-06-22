@@ -172,9 +172,15 @@ class BPTab(QWidget):
         I18n.instance().language_changed.connect(self._on_lang_change)
 
     def _on_lang_change(self) -> None:
-        self._sbp_panel._label.setText(tr("bp_sbp_label"))
-        self._dbp_panel._label.setText(tr("bp_dbp_label"))
-        self._dist_label.setText(tr("bp_dist_label"))
+        self._sbp_panel._label.setText(
+            tr("bp_sbp_label") if tr("bp_sbp_label") != "bp_sbp_label" else "SBP"
+        )
+        self._dbp_panel._label.setText(
+            tr("bp_dbp_label") if tr("bp_dbp_label") != "bp_dbp_label" else "DBP"
+        )
+        self._dist_label.setText(
+            tr("bp_dist_label") if tr("bp_dist_label") != "bp_dist_label" else "Distance: --"
+        )
 
     def update_display(self, bp_result) -> None:
         """Accept BPResult and refresh all UI elements."""
