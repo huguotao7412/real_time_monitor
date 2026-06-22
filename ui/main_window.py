@@ -205,6 +205,11 @@ class MainWindow(QMainWindow):
         self._tabs.setTabVisible(0, show_subject)
         self._tabs.setTabVisible(1, show_bp)
         self._tabs.setTabVisible(2, show_research)
+        # Update research tab labels for current mode
+        if isinstance(self._current_mode, BPMode):
+            self._research_tab.set_bp_mode_labels()
+        else:
+            self._research_tab.set_hr_mode_labels()
 
     # === Slots ===
 

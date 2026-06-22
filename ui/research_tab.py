@@ -198,6 +198,40 @@ class ResearchTab(QWidget):
         else:
             self._record_timer_label.setText("")
 
+    def set_bp_mode_labels(self) -> None:
+        """Update combo box labels for BP mode (cleaner-only, no separator)."""
+        self._algo_combo.clear()
+        self._algo_combo.addItems([
+            "EMD Pulse (default)",
+            "VMD+RLS Cleaner",
+            "EMD Harmonic",
+            "Passthrough (baseline)",
+        ])
+        self._ab_combo.clear()
+        self._ab_combo.addItems([
+            tr("ab_off"),
+            "VMD+RLS Cleaner",
+            "EMD Harmonic",
+            "Passthrough (baseline)",
+        ])
+
+    def set_hr_mode_labels(self) -> None:
+        """Update combo box labels for HR mode (cleaner+separator pairs)."""
+        self._algo_combo.clear()
+        self._algo_combo.addItems([
+            tr("algo_adaptive"),
+            tr("algo_vmd_wpd"),
+            tr("algo_emd_wpd"),
+            tr("algo_passthrough_sos"),
+        ])
+        self._ab_combo.clear()
+        self._ab_combo.addItems([
+            tr("ab_off"),
+            tr("algo_vmd_wpd"),
+            tr("algo_emd_wpd"),
+            tr("algo_passthrough_sos"),
+        ])
+
     def start(self) -> None:
         self._trend.start()
 
