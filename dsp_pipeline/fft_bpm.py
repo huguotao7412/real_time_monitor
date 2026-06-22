@@ -32,7 +32,7 @@ def estimate_bpm(
     if n < 16:
         return 0.0, 0.0
 
-    t = np.arange(n)
+    t = np.linspace(-1.0, 1.0, n)
     poly = np.polyfit(t, signal, 3)  # 三次去趋势 (MATLAB: detrend(signal, 3))
     detrended = signal - np.polyval(poly, t)
 
@@ -142,7 +142,7 @@ def estimate_breath_bpm_time_domain(
         return 0.0
 
     # 1. 三次多项式去趋势：彻底消灭没有带通后的超低频基线漂移，让信号完美对称归零
-    t = np.arange(n)
+    t = np.linspace(-1.0, 1.0, n)
     poly = np.polyfit(t, signal, 3)
     detrended = signal - np.polyval(poly, t)
 
@@ -318,7 +318,7 @@ def estimate_bpm_stft(
     # FFT fallback for heart: upper bound (MATLAB: 1.0-2.5 Hz)
     f0 = breath_bpm / 60.0 if breath_bpm > 0 else 0.0
     heart_fft_bpm, heart_fft_prom = estimate_bpm(
-        heart_clean, fs, (0.8, 2.5), f0=f0, n_fft=FFT_N_BREATH)
+        heart_clean, fs, (0.8, 2.5), f0=f0, n_fft=n_fft)
 
     if heart_bpm_stft > 0 and heart_fft_bpm > 0:
         heart_bpm = min(heart_bpm_stft, heart_fft_bpm)
@@ -518,7 +518,7 @@ def _viterbi_ridge(
 def _detrend_cubic(signal: np.ndarray) -> np.ndarray:
     """Cubic polynomial detrend — matches MATLAB detrend(signal, 3)."""
     n = len(signal)
-    t = np.arange(n)
+    t = np.linspace(-1.0, 1.0, n)
     coeffs = np.polyfit(t, signal, 3)
     trend = np.polyval(coeffs, t)
     return signal - trend

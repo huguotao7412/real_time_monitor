@@ -546,12 +546,23 @@ class BPPipeline:
             )
 
         if target_bin is not None and new_target_bin != target_bin:
-            # 前面部分取老距离元的真实生理信号，后面部分取新距离元信号
+            transition_idx = -self.STEP_FRAMES
+
+            # 提取边界处单点复数 (确保维度为标量复数)
+            old_c = mean_bin_frame_rx[target_bin, transition_idx, :][0]
+            new_c = mean_bin_frame_rx[new_target_bin, transition_idx, :][0]
+
+            # 计算复数域的精确相位差 (Old - New)
+            phase_shift_rad = np.angle(old_c * np.conj(new_c))
+
             complex_old = mean_bin_frame_rx[target_bin, :-self.STEP_FRAMES, :]
             complex_new = mean_bin_frame_rx[new_target_bin, -self.STEP_FRAMES:, :]
+
+            # 【核心修复】在拼接与解包前，先在复数域旋转新信号以对齐旧信号的相位
+            complex_new = complex_new * np.exp(1j * phase_shift_rad)
             complex_data = np.concatenate([complex_old, complex_new], axis=0)
 
-            print(f"[BPPipeline] Target bin updated: {target_bin} → {new_target_bin}")
+            print(f"[BPPipeline] Target bin updated: {target_bin} → {new_target_bin}, Phase aligned")
             target_bin = new_target_bin
             with self._state_lock:
                 self._target_bin = target_bin
@@ -562,11 +573,7 @@ class BPPipeline:
         unwrapped = np.unwrap(phase_data, axis=0).squeeze()
         unwrapped_scaled = unwrapped * FREQ_SCALE_60G_TO_24G
 
-        # apply cross-bin phase compensation
-        if phase_offset != 0.0:
-            unwrapped_scaled[-self.STEP_FRAMES:] += phase_offset
-
-        # store phase reference for future continuity
+        # 存储参考点以备后用
         self._last_phase_ref = (target_bin, float(unwrapped_scaled[-1]))
 
         # --- low-signal detection → soft reset ---
