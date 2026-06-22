@@ -45,9 +45,10 @@ from config.protocol import (
 from models.radar_frame import RadarFrame
 from bp_monitor.bp_models import BPResult
 from bp_monitor.bp_cfar import find_target_bins_1d, adaptive_2d_cfar
-from bp_monitor.bp_signal_cleaner import clean_pulse_wave
 from bp_monitor.bp_network import BPInference
 from bp_monitor.bp_postprocess import extract_bp
+from dsp_pipeline.strategies import SignalCleanerStrategy, EMDPulseCleaner
+from utils.benchmark_logger import AlgorithmBenchmarker, BenchmarkRecord
 
 
 # ---------------------------------------------------------------------------
@@ -134,13 +135,24 @@ class BPPipeline:
     STEP_FRAMES = int(BP_STEP_SEC * FS)    # 100
     DISTANCE_PER_BIN = RANGE_RESOLUTION_M  # 0.039 m
 
-    def __init__(self, weights_path: str = "bp_matlab/bp_weights.mat"):
+    def __init__(
+        self,
+        weights_path: str = "bp_matlab/bp_weights.mat",
+        cleaner: SignalCleanerStrategy | None = None,
+        benchmarker: AlgorithmBenchmarker | None = None,
+    ):
         # -- public queues (API compatible with v1) --
         self.raw_queue: queue.Queue[RadarFrame] = queue.Queue(maxsize=RAW_QUEUE_MAXSIZE)
         self.display_queue: queue.Queue[BPResult] = queue.Queue(maxsize=DISPLAY_QUEUE_MAXSIZE)
 
         self._weights_path = weights_path
         self._bp: BPInference | None = None
+
+        # -- strategy injection --
+        self._cleaner: SignalCleanerStrategy = cleaner or EMDPulseCleaner()
+
+        # -- benchmarker --
+        self._benchmarker: AlgorithmBenchmarker | None = benchmarker
 
         # -- threads --
         self._collector_thread: threading.Thread | None = None
@@ -150,43 +162,39 @@ class BPPipeline:
         # ==================================================================
         # Ring buffer  (Optimisation 3 — zero-copy / no physical shift)
         # ==================================================================
-        #  Layout:  [32 range-bins, MAX_FRAMES time-slots, 1 RX]
         self._buffer = np.zeros((32, self.MAX_FRAMES, 1), dtype=complex)
-        self._head: int = 0           # next write slot  (0 … MAX_FRAMES-1)
-        self._frame_count: int = 0    # total frames ever written (monotonic)
+        self._head: int = 0
+        self._frame_count: int = 0
 
         # ==================================================================
         # Collector → Worker channel
         # ==================================================================
-        # maxsize=2 gives natural back-pressure: if the worker is still
-        # processing batch N, batch N+1 can be queued, but N+2 is dropped.
         self._inference_queue: queue.Queue = queue.Queue(maxsize=2)
 
         # ==================================================================
-        # Shared state  (protected by _state_lock — collector reads,
-        #                worker writes)
+        # Shared state
         # ==================================================================
         self._state_lock = threading.Lock()
         self._target_bin: int | None = None
         self._tracker_state: TrackerState = TrackerState.TRACKING
         self._cfar_state: dict | None = None
-        self._cold_start: bool = True       # True until first valid SBP/DBP
+        self._cold_start: bool = True
 
         # ==================================================================
-        # Alpha-Beta tracker  (Optimisation 2)
+        # Alpha-Beta tracker
         # ==================================================================
         self._tracker = AlphaBetaTracker(alpha=0.85, beta=0.5)
 
-        # Phase-continuity reference for cross-bin alignment on re-lock
-        self._last_phase_ref: tuple[int, float] | None = None  # (bin, phase_rad)
+        # Phase-continuity reference
+        self._last_phase_ref: tuple[int, float] | None = None
 
         # ==================================================================
-        # Worker-owned state  (no lock needed — only the worker touches these)
+        # Worker-owned state
         # ==================================================================
-        self._last_inference_frame: int = 0   # frame_count of last trigger
+        self._last_inference_frame: int = 0
         self._bad_signal_count: int = 0
 
-        # Temporal smoothing: sliding windows for SBP/DBP (median → EMA)
+        # Temporal smoothing
         self._sbp_history: deque[float] = deque(maxlen=10)
         self._dbp_history: deque[float] = deque(maxlen=10)
         self._sbp_ema: float | None = None
@@ -195,6 +203,13 @@ class BPPipeline:
     # ======================================================================
     # Public API  (unchanged)
     # ======================================================================
+
+    @property
+    def benchmarker(self) -> AlgorithmBenchmarker | None:
+        return self._benchmarker
+
+    def set_benchmarker(self, bm: AlgorithmBenchmarker | None) -> None:
+        self._benchmarker = bm
 
     @property
     def target_bin(self) -> int | None:
@@ -536,8 +551,38 @@ class BPPipeline:
             unwrapped_scaled, up=int(self.FS_TARGET), down=int(self.FS)
         )
 
-        # --- signal cleaning (EMD + wavelet) ---
-        clean = clean_pulse_wave(wave_50hz_raw, fs=self.FS_TARGET)
+        # --- signal cleaning (strategy-injected) ---
+        clean, metrics = self._cleaner.clean(wave_50hz_raw, fs=self.FS_TARGET)
+
+        # --- benchmark log ---
+        if self._benchmarker and self._benchmarker.is_recording:
+            try:
+                input_pr = float(np.max(wave_50hz_raw) - np.min(wave_50hz_raw))
+            except Exception:
+                input_pr = 0.0
+            self._benchmarker.log(BenchmarkRecord(
+                timestamp=time.time(),
+                frame_index=frame_count,
+                elapsed_sec=frame_count / self.FS,
+                algorithm_name=metrics.get("algorithm", "EMD_Pulse"),
+                is_primary=True,
+                latency_ms=metrics.get("latency_ms", 0.0),
+                input_phase_range=input_pr,
+                input_snr_db=None,
+                output_phase_range=float(np.max(clean) - np.min(clean)) if len(clean) > 0 else 0.0,
+                output_snr_db=None,
+                snr_gain_db=None,
+                breath_bpm=0.0,
+                heart_bpm=0.0,
+                heart_prominence=0.0,
+                imf_count=metrics.get("imf_count"),
+                convergence_iter=metrics.get("convergence_iter"),
+                retained_harmonics=(
+                    ",".join(str(h) for h in metrics["retained_harmonics"])
+                    if metrics.get("retained_harmonics") else None
+                ),
+                dominant_freq_hz=metrics.get("dominant_freq_hz"),
+            ))
 
         if len(clean) >= self.N_INPUT:
             input_seq = clean[-self.N_INPUT:]
