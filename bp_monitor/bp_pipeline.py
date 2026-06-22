@@ -24,6 +24,7 @@ Usage (unchanged public API):
     pipeline.stop()
 """
 
+import concurrent.futures
 import threading
 import time
 import queue
@@ -47,7 +48,7 @@ from bp_monitor.bp_models import BPResult
 from bp_monitor.bp_cfar import find_target_bins_1d, adaptive_2d_cfar
 from bp_monitor.bp_network import BPInference
 from bp_monitor.bp_postprocess import extract_bp
-from dsp_pipeline.strategies import SignalCleanerStrategy, EMDPulseCleaner
+from dsp_pipeline.strategies import SignalCleanerStrategy, EMDPulseCleaner, PassthroughCleaner
 from utils.benchmark_logger import AlgorithmBenchmarker, BenchmarkRecord
 
 
@@ -150,6 +151,16 @@ class BPPipeline:
 
         # -- strategy injection --
         self._cleaner: SignalCleanerStrategy = cleaner or EMDPulseCleaner()
+        self._current_algo_name: str = "EMD_Pulse"
+        self._current_latency_ms: float = 0.0
+
+        # -- A/B comparison --
+        self._ab_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        self._ab_enabled: bool = False
+        self._ab_cleaner: SignalCleanerStrategy | None = None
+        self._ab_future: concurrent.futures.Future | None = None
+        self._ab_algo_name: str = ""
+        self._ab_latency_ms: float = 0.0
 
         # -- benchmarker --
         self._benchmarker: AlgorithmBenchmarker | None = benchmarker
@@ -210,6 +221,31 @@ class BPPipeline:
 
     def set_benchmarker(self, bm: AlgorithmBenchmarker | None) -> None:
         self._benchmarker = bm
+
+    # ── Strategy control ───────────────────────────────────────
+
+    def set_strategies(self, cleaner: SignalCleanerStrategy) -> None:
+        """Hot-swap primary cleaner. Takes effect on next worker batch."""
+        self._cleaner = cleaner
+        cname = cleaner.clean(np.array([0.0]), self.FS_TARGET)[1].get("algorithm", "?")
+        self._current_algo_name = cname
+
+    def set_ab_strategy(self, cleaner: SignalCleanerStrategy | None) -> None:
+        """Set or disable A/B comparison cleaner. None disables."""
+        self._ab_cleaner = cleaner
+        self._ab_enabled = (cleaner is not None)
+
+    def get_dsp_telemetry(self) -> dict:
+        """Return current DSP engine telemetry for debug panel."""
+        return {
+            "current_algo": self._current_algo_name,
+            "current_latency_ms": self._current_latency_ms,
+            "current_snr_gain_db": 0.0,  # BP doesn't compute SNR gain yet
+            "ab_algo": self._ab_algo_name if self._ab_enabled else "",
+            "ab_latency_ms": self._ab_latency_ms if self._ab_enabled else 0.0,
+            "ab_snr_gain_db": 0.0,
+            "ab_enabled": self._ab_enabled,
+        }
 
     @property
     def target_bin(self) -> int | None:
@@ -583,6 +619,56 @@ class BPPipeline:
                 ),
                 dominant_freq_hz=metrics.get("dominant_freq_hz"),
             ))
+            # Update telemetry
+            self._current_algo_name = metrics.get("algorithm", "EMD_Pulse")
+            self._current_latency_ms = metrics.get("latency_ms", 0.0)
+
+        # ── A/B comparison: dispatch alternative cleaner ──
+        if self._ab_enabled and self._ab_cleaner is not None:
+            # Check previous A/B result
+            if self._ab_future is not None and self._ab_future.done():
+                try:
+                    ab_clean, ab_metrics = self._ab_future.result()
+                    self._ab_algo_name = ab_metrics.get("algorithm", "?")
+                    self._ab_latency_ms = ab_metrics.get("latency_ms", 0.0)
+                    # Log A/B result if benchmarker is recording
+                    if self._benchmarker and self._benchmarker.is_recording:
+                        try:
+                            ab_input_pr = float(np.max(wave_50hz_raw) - np.min(wave_50hz_raw))
+                        except Exception:
+                            ab_input_pr = 0.0
+                        self._benchmarker.log(BenchmarkRecord(
+                            timestamp=time.time(),
+                            frame_index=frame_count,
+                            elapsed_sec=frame_count / self.FS,
+                            algorithm_name=ab_metrics.get("algorithm", "AB"),
+                            is_primary=False,
+                            latency_ms=ab_metrics.get("latency_ms", 0.0),
+                            input_phase_range=ab_input_pr,
+                            input_snr_db=None,
+                            output_phase_range=float(np.max(ab_clean) - np.min(ab_clean)) if len(ab_clean) > 0 else 0.0,
+                            output_snr_db=None,
+                            snr_gain_db=None,
+                            breath_bpm=0.0,
+                            heart_bpm=0.0,
+                            heart_prominence=0.0,
+                            imf_count=ab_metrics.get("imf_count"),
+                            convergence_iter=ab_metrics.get("convergence_iter"),
+                            retained_harmonics=(
+                                ",".join(str(h) for h in ab_metrics["retained_harmonics"])
+                                if ab_metrics.get("retained_harmonics") else None
+                            ),
+                            dominant_freq_hz=ab_metrics.get("dominant_freq_hz"),
+                        ))
+                except Exception:
+                    self._ab_algo_name = "error"
+                    self._ab_latency_ms = 0.0
+
+            # Dispatch new A/B task if idle
+            if self._ab_future is None or self._ab_future.done():
+                self._ab_future = self._ab_executor.submit(
+                    self._ab_cleaner.clean, wave_50hz_raw.copy(), self.FS_TARGET,
+                )
 
         if len(clean) >= self.N_INPUT:
             input_seq = clean[-self.N_INPUT:]
