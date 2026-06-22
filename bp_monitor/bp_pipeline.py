@@ -83,15 +83,11 @@ class AlphaBetaTracker:
 
     # -- public -----------------------------------------------------------
 
-    def predict(self) -> float | None:
-        """Advance the state by one frame (constant-velocity prediction).
-
-        Call once per incoming frame, even when no observation is available.
-        Returns the predicted bin or *None* before the first observation.
-        """
+    def predict(self,dt: float = 1.0) -> float | None:
+        """Advance the state by dt frames."""
         if self.x_hat is None:
             return None
-        self.x_hat += self.v_hat
+        self.x_hat += self.v_hat * dt
         return self.x_hat
 
     def update(self, observed: float) -> float:
@@ -489,7 +485,7 @@ class BPPipeline:
         # ================================================================
 
         # --- tracker predict (run every batch, even when tracking) ---
-        self._tracker.predict()
+        self._tracker.predict(dt=self.STEP_FRAMES)
 
         print(f"[BPPipeline] Processing batch at frame {frame_count}...")
 
@@ -536,14 +532,12 @@ class BPPipeline:
         if target_bin is not None and new_target_bin != target_bin and self._last_phase_ref is not None:
             ref_bin, _ref_phase = self._last_phase_ref
             # extract phase at the *same* latest frame for both bins
-            old_complex = mean_bin_frame_rx[target_bin, -1, :]
-            new_complex = mean_bin_frame_rx[new_target_bin, -1, :]
-            old_phase = np.angle(
-                old_complex[np.argmax(np.abs(old_complex))]
-            )
-            new_phase = np.angle(
-                new_complex[np.argmax(np.abs(new_complex))]
-            )
+            transition_idx = -self.STEP_FRAMES
+            old_complex = mean_bin_frame_rx[target_bin, transition_idx, :]
+            new_complex = mean_bin_frame_rx[new_target_bin, transition_idx, :]
+
+            old_phase = np.angle(old_complex[np.argmax(np.abs(old_complex))])
+            new_phase = np.angle(new_complex[np.argmax(np.abs(new_complex))])
             raw_diff = np.angle(np.exp(1j * (old_phase - new_phase)))
             phase_offset = raw_diff * FREQ_SCALE_60G_TO_24G
             print(
@@ -551,26 +545,26 @@ class BPPipeline:
                 f" (bin {target_bin} → {new_target_bin})"
             )
 
-        if new_target_bin != target_bin:
-            print(
-                f"[BPPipeline] Target bin updated: {target_bin}"
-                f" → {new_target_bin}"
-            )
+        if target_bin is not None and new_target_bin != target_bin:
+            # 前面部分取老距离元的真实生理信号，后面部分取新距离元信号
+            complex_old = mean_bin_frame_rx[target_bin, :-self.STEP_FRAMES, :]
+            complex_new = mean_bin_frame_rx[new_target_bin, -self.STEP_FRAMES:, :]
+            complex_data = np.concatenate([complex_old, complex_new], axis=0)
+
+            print(f"[BPPipeline] Target bin updated: {target_bin} → {new_target_bin}")
             target_bin = new_target_bin
             with self._state_lock:
                 self._target_bin = target_bin
+        else:
+            complex_data = mean_bin_frame_rx[target_bin, :, :]  # [N, 1]
 
-        # --- phase extraction ---
-        complex_data = mean_bin_frame_rx[target_bin, :, :]  # [N, 1]
         phase_data = np.angle(complex_data)
         unwrapped = np.unwrap(phase_data, axis=0).squeeze()
-
-        # --- frequency scaling ---
         unwrapped_scaled = unwrapped * FREQ_SCALE_60G_TO_24G
 
         # apply cross-bin phase compensation
         if phase_offset != 0.0:
-            unwrapped_scaled = unwrapped_scaled + phase_offset
+            unwrapped_scaled[-self.STEP_FRAMES:] += phase_offset
 
         # store phase reference for future continuity
         self._last_phase_ref = (target_bin, float(unwrapped_scaled[-1]))
@@ -750,7 +744,12 @@ class BPPipeline:
         )
         with self._state_lock:
             self._tracker_state = TrackerState.LOST
-            self._target_bin = None
+            predicted_bin = self._tracker.x_hat
+            if predicted_bin is not None:
+                self._target_bin = int(round(predicted_bin))
+            else:
+                self._target_bin = None
+
             self._cfar_state = None
         self._bad_signal_count = 0
         # NOTE: _buffer, _head, _frame_count, _last_phase_ref are preserved
