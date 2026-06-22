@@ -324,6 +324,10 @@ class MainWindow(QMainWindow):
 
         # 4. Update UI
         self._update_tab_visibility()
+        if isinstance(self._current_mode, BPMode):
+            self._tabs.setCurrentWidget(self._bp_tab)  # 切换到血压模式时，强制选中血压标签页
+        else:
+            self._tabs.setCurrentWidget(self._subject_tab)  # 切换到心率模式时，强制选中受试者标签页
         self._mode_btn.setText(
             tr("btn_mode_hr") if isinstance(self._current_mode, BPMode)
             else tr("btn_mode_bp")
