@@ -157,6 +157,15 @@ class Pipeline:
         # ── Benchmarker ──
         self._benchmarker: AlgorithmBenchmarker | None = None
 
+        # 弱信号计数 (用于 Range Bin 重捕获)
+        self._low_signal_frame_count: int = 0
+        self._last_valid_breath_bpm: float = 0.0
+        self._last_valid_heart_bpm: float = 0.0
+
+        # ========== 【新增：跨距离元相位补偿量】 ==========
+        # 用于在目标移动发生 Range Bin 切换时，无缝对齐历史波形的基准线
+        self._cross_bin_phase_offset: float = 0.0
+
     @property
     def calibration_done(self) -> bool:
         return True
@@ -236,28 +245,38 @@ class Pipeline:
                     quality={"valid": False, "reason": "Searching Target"}
                 )
         elif self._frame_count > 0 and self._frame_count % self._cfar_rescan_interval == 0:
-                new_bin, new_snr, current_actual_snr = self._run_2d_cfar_rescan()
-                if new_bin is not None:
-                    # 修复：当人离开原位置时，旧位置 SNR 为 0.0。
-                    # 只要旧位置没信号了，或者新位置信号比旧位置强 1.2 倍，就果断更新距离！
-                    MIN_NEW_TARGET_SNR = 12.0
-                    if new_snr > MIN_NEW_TARGET_SNR and (
-                            current_actual_snr < 5.0 or new_snr > current_actual_snr * CFAR_SNR_UPDATE_RATIO):
-                        print(f"[DSP] Target moved! Range updated to bin: {new_bin} ...")
-                        self._best_bin = new_bin
-                        self._current_bin_snr = new_snr
+            new_bin, new_snr, current_actual_snr = self._run_2d_cfar_rescan()
+            if new_bin is not None:
+                MIN_NEW_TARGET_SNR = 12.0
+                if new_snr > MIN_NEW_TARGET_SNR and (
+                        current_actual_snr < 5.0 or new_snr > current_actual_snr * CFAR_SNR_UPDATE_RATIO):
+                    print(f"[DSP] Target moved! Range updated to bin: {new_bin} ...")
+
+                    # ========== 【核心修改：计算跨 Bin 瞬时相位差】 ==========
+                    if self._best_bin is not None:
+                        # 提取在切换这一帧时，旧 Bin 和新 Bin 的空间绝对相位
+                        old_phase_inst = extract_phase(data_cube, self._best_bin)
+                        new_phase_inst = extract_phase(data_cube, new_bin)
+
+                        # 将这个阶跃差值累加到全局补偿量中
+                        self._cross_bin_phase_offset += (old_phase_inst - new_phase_inst)
+                    # ========================================================
+
+                    self._best_bin = new_bin
+                    self._current_bin_snr = new_snr
 
         # 2. Extract per-RX complex data and buffer
         rx_complex = None
         try:
-            rx_complex = self._extract_rx_complex(data_cube)
-            self._rx_buffer.append(rx_complex)
+                    rx_complex = self._extract_rx_complex(data_cube)
+                    self._rx_buffer.append(rx_complex)
         except (IndexError, ValueError):
-            pass
+                    pass
 
         # 3. Fallback: simple scalar phase (always buffered)
-        phase = extract_phase(data_cube, self._best_bin)
-        self._phase_buffer.append(phase)
+        raw_phase = extract_phase(data_cube, self._best_bin)
+        compensated_phase = raw_phase + self._cross_bin_phase_offset
+        self._phase_buffer.append(compensated_phase)
         self._frame_count += 1
 
         MIN_STARTUP_FRAMES = int(FS_HZ * DSP_STARTUP_SEC)
@@ -393,6 +412,8 @@ class Pipeline:
         diff_phase = np.abs(np.diff(unwrapped))
         MA_THRESHOLD = 0.8  # 可视实际波长调节（rad/frame），24GHz或77GHz表现不同
 
+        raw_last_phase = unwrapped[-1]
+
         if np.any(diff_phase > MA_THRESHOLD):
             # 引入快速 Hampel 滤波（局部中值异常点剔除）
             window_size = 5
@@ -411,7 +432,7 @@ class Pipeline:
             outliers = np.abs(unwrapped - local_medians) > (3 * local_mads)
             unwrapped[outliers] = local_medians[outliers]
 
-        self._last_unwrapped_phase = unwrapped[-1]
+        self._last_unwrapped_phase = raw_last_phase
         return remove_dc(unwrapped)
 
     def _advanced_dsp_path(
@@ -501,7 +522,7 @@ class Pipeline:
             recent_phase_range = phase_range
 
         # 弱信号检测 → Range Bin 重捕获
-        SNR_THRESHOLD_EMPTY = 10.0  # 你可以根据实际雷达表现微调这个经验值
+        SNR_THRESHOLD_EMPTY = 10.0  # 根据实际雷达表现微调经验值
         in_low_signal = (recent_phase_range < PHASE_RANGE_MIN_NORMAL) and (self._current_bin_snr < SNR_THRESHOLD_EMPTY)
 
         if in_low_signal:
@@ -516,6 +537,7 @@ class Pipeline:
             self._rx_buffer.clear()
             self._last_unwrapped_phase = None
             self._low_signal_frame_count = 0
+            self._cross_bin_phase_offset = 0.0
 
         # BPM 估计
         breath_bpm = self._last_valid_breath_bpm

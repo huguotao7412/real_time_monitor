@@ -485,7 +485,7 @@ class BPPipeline:
         # ================================================================
 
         # --- tracker predict (run every batch, even when tracking) ---
-        self._tracker.predict(dt=self.STEP_FRAMES)
+        self._tracker.predict(dt=1.0)
 
         print(f"[BPPipeline] Processing batch at frame {frame_count}...")
 
@@ -746,7 +746,9 @@ class BPPipeline:
             self._tracker_state = TrackerState.LOST
             predicted_bin = self._tracker.x_hat
             if predicted_bin is not None:
-                self._target_bin = int(round(predicted_bin))
+                max_bin = self._buffer.shape[0] - 1  # 31
+                safe_bin = int(round(predicted_bin))
+                self._target_bin = max(0, min(safe_bin, max_bin))
             else:
                 self._target_bin = None
 

@@ -80,7 +80,7 @@ class RadarMgr:
             if self._ser.control_serial:
                 self._ser.control_serial.timeout = 0.05
                 while True:
-                    line = self._ser.read_data_line()
+                    line = self._ser.control_serial.readline()
                     if not line:
                         break
         except Exception:
