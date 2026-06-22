@@ -26,6 +26,10 @@ from io_engine.data_exporter import export_csv, export_hdf5, export_edf, export_
 from ui.subject_tab import SubjectTab
 from ui.research_tab import ResearchTab
 from ui.monitor_mode import MonitorMode, HRMode, BPMode
+from dsp_pipeline.strategies import (
+    VMDRLSCleaner, EMDHarmonicCleaner, PassthroughCleaner,
+    WPDSeparator, SOSFilterSeparator,
+)
 
 
 class MainWindow(QMainWindow):
@@ -95,6 +99,16 @@ class MainWindow(QMainWindow):
         from ui.bp_tab import BPTab
         self._bp_tab = BPTab()
         self._research_tab = ResearchTab()
+        # Wire algorithm panel signals
+        self._research_tab._algo_combo.currentIndexChanged.connect(
+            self._on_research_algo_changed
+        )
+        self._research_tab._ab_combo.currentIndexChanged.connect(
+            self._on_research_ab_changed
+        )
+        self._research_tab._record_btn.clicked.connect(
+            self._on_research_record_toggle
+        )
         self._tabs.addTab(self._subject_tab, tr("tab_subject"))
         self._tabs.addTab(self._bp_tab, tr("tab_bp"))
         self._tabs.addTab(self._research_tab, tr("tab_research"))
@@ -337,6 +351,44 @@ class MainWindow(QMainWindow):
         self._status_label.setText(tr("status_stopped"))
         self._status_label.setStyleSheet("color: #f39c12;")
 
+    # ── Research tab algorithm signal handlers ──
+
+    def _on_research_algo_changed(self, index: int) -> None:
+        """Apply primary algorithm selection to the current mode."""
+        if not isinstance(self._current_mode, HRMode):
+            return
+        mode: HRMode = self._current_mode
+        if index == 0:
+            mode.set_adaptive_mode()
+        elif index == 1:
+            mode.set_strategies(VMDRLSCleaner(), WPDSeparator())
+        elif index == 2:
+            mode.set_strategies(EMDHarmonicCleaner(), WPDSeparator())
+        elif index == 3:
+            mode.set_strategies(PassthroughCleaner(), SOSFilterSeparator())
+
+    def _on_research_ab_changed(self, index: int) -> None:
+        """Apply A/B algorithm selection to the current mode."""
+        if not isinstance(self._current_mode, HRMode):
+            return
+        mode: HRMode = self._current_mode
+        pair_map = {
+            0: (None, None),
+            1: (VMDRLSCleaner(), WPDSeparator()),
+            2: (EMDHarmonicCleaner(), WPDSeparator()),
+            3: (PassthroughCleaner(), SOSFilterSeparator()),
+        }
+        cleaner, separator = pair_map.get(index, (None, None))
+        mode.set_ab_strategy(cleaner, separator)
+
+    def _on_research_record_toggle(self) -> None:
+        """Start or stop benchmark recording."""
+        if not isinstance(self._current_mode, HRMode):
+            return
+        mode: HRMode = self._current_mode
+        is_recording = mode.toggle_benchmark()
+        self._research_tab.set_recording_state(is_recording)
+
     def _on_save(self) -> None:
         is_bp = isinstance(self._current_mode, BPMode)
         formats = [
@@ -448,6 +500,11 @@ class MainWindow(QMainWindow):
 
         if not self._running:
             return
+
+        # Update benchmark recording timer
+        if isinstance(self._current_mode, HRMode):
+            elapsed = self._current_mode.get_benchmark_elapsed()
+            self._research_tab.update_record_timer(elapsed)
 
         # Delegate display polling to current mode
         self._current_mode.poll_and_update(
