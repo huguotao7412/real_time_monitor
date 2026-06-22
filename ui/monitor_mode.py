@@ -387,8 +387,13 @@ class BPMode(MonitorMode):
     def __init__(self):
         self._pipeline = None  # type: ignore  # BPPipeline
         self._latest_bp_result = None  # type: ignore  # BPResult
-        self._bp_results: deque = deque(maxlen=720)  # ~1 hour at 5 s/batch
-        self._csv_rows: deque = deque(maxlen=3600)  # ~1 hour at 1 row/s
+        self._bp_results: deque = deque(maxlen=720)
+        self._csv_rows: deque = deque(maxlen=3600)
+
+        # Strategy + benchmarker state
+        self._pending_cleaner: SignalCleanerStrategy | None = None
+        self._pending_ab_cleaner: SignalCleanerStrategy | None = None
+        self._benchmarker: AlgorithmBenchmarker | None = None
 
 
     # -- MonitorMode impl ------------------------------------------------
@@ -412,7 +417,15 @@ class BPMode(MonitorMode):
 
     def start(self) -> None:
         from bp_monitor.bp_pipeline import BPPipeline
-        self._pipeline = BPPipeline("bp_matlab/bp_weights.mat")
+        cleaner = self._pending_cleaner or EMDPulseCleaner()
+        self._pipeline = BPPipeline(
+            "bp_matlab/bp_weights.mat",
+            cleaner=cleaner,
+        )
+        if self._pending_ab_cleaner is not None:
+            self._pipeline.set_ab_strategy(self._pending_ab_cleaner)
+        if self._benchmarker is not None:
+            self._pipeline.set_benchmarker(self._benchmarker)
         self._pipeline.start()
 
     def stop(self) -> None:
@@ -420,6 +433,51 @@ class BPMode(MonitorMode):
             _drain_queue(self._pipeline.display_queue)
             self._pipeline.stop()
             self._pipeline = None
+
+    # ── Strategy control ─────────────────────────────────────────
+
+    def set_strategies(self, cleaner: SignalCleanerStrategy) -> None:
+        self._pending_cleaner = cleaner
+        if self._pipeline is not None:
+            self._pipeline.set_strategies(cleaner)
+
+    def set_ab_strategy(self, cleaner: SignalCleanerStrategy | None) -> None:
+        self._pending_ab_cleaner = cleaner
+        if self._pipeline is not None:
+            self._pipeline.set_ab_strategy(cleaner)
+
+    def toggle_benchmark(self) -> bool:
+        if self._benchmarker is None:
+            self._benchmarker = AlgorithmBenchmarker()
+        if self._benchmarker.is_recording:
+            self._benchmarker.stop()
+            return False
+        else:
+            self._benchmarker.start()
+            if self._pipeline is not None:
+                self._pipeline.set_benchmarker(self._benchmarker)
+            return True
+
+    def get_dsp_telemetry(self) -> dict:
+        if self._pipeline is None:
+            return {
+                "current_algo": "--",
+                "current_latency_ms": 0.0,
+                "current_snr_gain_db": 0.0,
+                "ab_algo": "",
+                "ab_latency_ms": 0.0,
+                "ab_snr_gain_db": 0.0,
+                "ab_enabled": False,
+            }
+        return self._pipeline.get_dsp_telemetry()
+
+    def get_benchmarker(self) -> AlgorithmBenchmarker | None:
+        return self._benchmarker
+
+    def get_benchmark_elapsed(self) -> float:
+        if self._benchmarker is None or not self._benchmarker.is_recording:
+            return 0.0
+        return time.time() - self._benchmarker._start_time
 
     def feed_frame(self, frame: RadarFrame) -> None:
         if self._pipeline is None:
@@ -448,6 +506,20 @@ class BPMode(MonitorMode):
             bp_tab.update_display(r)
             self._bp_results.append(r)
 
+            # Update research tab with BP telemetry
+            dsp_telemetry = self.get_dsp_telemetry()
+            benchmark_elapsed = self.get_benchmark_elapsed()
+            research_tab.update_display(
+                breath_bpm=0.0,  # BP mode doesn't compute breath BPM
+                heart_bpm=0.0,   # BP mode doesn't compute heart BPM
+                breath_waveform=np.array([]),
+                heart_waveform=np.array([]),
+                quality=r.quality,
+                sample_for_trend=False,
+                dsp_telemetry=dsp_telemetry,
+                benchmark_elapsed=benchmark_elapsed,
+            )
+
             # Record valid BP readings for export
             if not np.isnan(r.sbp):
                 self._csv_rows.append({
@@ -463,7 +535,7 @@ class BPMode(MonitorMode):
             status_label.setStyleSheet("color: #27ae60;")
 
     def tab_visibility(self) -> tuple[bool, bool, bool]:
-        return (False, True, False)
+        return (False, True, True)  # show BP tab + Research tab
 
     def get_export_data(self) -> dict:
         return {

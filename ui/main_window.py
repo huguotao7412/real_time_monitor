@@ -28,7 +28,7 @@ from ui.research_tab import ResearchTab
 from ui.monitor_mode import MonitorMode, HRMode, BPMode
 from dsp_pipeline.strategies import (
     VMDRLSCleaner, EMDHarmonicCleaner, PassthroughCleaner,
-    WPDSeparator, SOSFilterSeparator,
+    WPDSeparator, SOSFilterSeparator, EMDPulseCleaner,
 )
 
 
@@ -355,37 +355,59 @@ class MainWindow(QMainWindow):
 
     def _on_research_algo_changed(self, index: int) -> None:
         """Apply primary algorithm selection to the current mode."""
-        if not isinstance(self._current_mode, HRMode):
-            return
-        mode: HRMode = self._current_mode
-        if index == 0:
-            mode.set_adaptive_mode()
-        elif index == 1:
-            mode.set_strategies(VMDRLSCleaner(), WPDSeparator())
-        elif index == 2:
-            mode.set_strategies(EMDHarmonicCleaner(), WPDSeparator())
-        elif index == 3:
-            mode.set_strategies(PassthroughCleaner(), SOSFilterSeparator())
+        if isinstance(self._current_mode, HRMode):
+            mode: HRMode = self._current_mode
+            if index == 0:
+                mode.set_adaptive_mode()
+            elif index == 1:
+                mode.set_strategies(VMDRLSCleaner(), WPDSeparator())
+            elif index == 2:
+                mode.set_strategies(EMDHarmonicCleaner(), WPDSeparator())
+            elif index == 3:
+                mode.set_strategies(PassthroughCleaner(), SOSFilterSeparator())
+        elif isinstance(self._current_mode, BPMode):
+            mode: BPMode = self._current_mode
+            if index == 1:
+                mode.set_strategies(VMDRLSCleaner())
+            elif index == 2:
+                mode.set_strategies(EMDHarmonicCleaner())
+            elif index == 3:
+                mode.set_strategies(PassthroughCleaner())
+            # index 0 (Adaptive) maps to default EMDPulseCleaner for BP
+            elif index == 0:
+                mode.set_strategies(EMDPulseCleaner())
 
     def _on_research_ab_changed(self, index: int) -> None:
         """Apply A/B algorithm selection to the current mode."""
-        if not isinstance(self._current_mode, HRMode):
-            return
-        mode: HRMode = self._current_mode
-        pair_map = {
-            0: (None, None),
-            1: (VMDRLSCleaner(), WPDSeparator()),
-            2: (EMDHarmonicCleaner(), WPDSeparator()),
-            3: (PassthroughCleaner(), SOSFilterSeparator()),
-        }
-        cleaner, separator = pair_map.get(index, (None, None))
-        mode.set_ab_strategy(cleaner, separator)
+        if isinstance(self._current_mode, HRMode):
+            mode: HRMode = self._current_mode
+            pair_map = {
+                0: (None, None),
+                1: (VMDRLSCleaner(), WPDSeparator()),
+                2: (EMDHarmonicCleaner(), WPDSeparator()),
+                3: (PassthroughCleaner(), SOSFilterSeparator()),
+            }
+            cleaner, separator = pair_map.get(index, (None, None))
+            mode.set_ab_strategy(cleaner, separator)
+        elif isinstance(self._current_mode, BPMode):
+            mode: BPMode = self._current_mode
+            ab_map = {
+                0: None,
+                1: VMDRLSCleaner(),
+                2: EMDHarmonicCleaner(),
+                3: PassthroughCleaner(),
+            }
+            cleaner = ab_map.get(index, None)
+            mode.set_ab_strategy(cleaner)
 
     def _on_research_record_toggle(self) -> None:
-        """Start or stop benchmark recording."""
-        if not isinstance(self._current_mode, HRMode):
+        """Start or stop benchmark recording (works for both HR and BP modes)."""
+        if isinstance(self._current_mode, HRMode):
+            mode: HRMode = self._current_mode
+        elif isinstance(self._current_mode, BPMode):
+            mode: BPMode = self._current_mode
+        else:
             return
-        mode: HRMode = self._current_mode
         is_recording = mode.toggle_benchmark()
         self._research_tab.set_recording_state(is_recording)
 
@@ -501,8 +523,8 @@ class MainWindow(QMainWindow):
         if not self._running:
             return
 
-        # Update benchmark recording timer
-        if isinstance(self._current_mode, HRMode):
+        # Update benchmark recording timer (works for both modes)
+        if isinstance(self._current_mode, (HRMode, BPMode)):
             elapsed = self._current_mode.get_benchmark_elapsed()
             self._research_tab.update_record_timer(elapsed)
 
