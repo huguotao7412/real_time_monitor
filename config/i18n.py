@@ -126,6 +126,19 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "export_format_csv": "Export to CSV (Basic)",
         "export_format_hdf5": "Export to HDF5 (Research)",
         "export_format_edf": "Export to EDF (Clinical)",
+
+        # Algorithm control panel
+        "algo_panel_label": "算法",
+        "algo_adaptive": "自适应 (Adaptive)",
+        "algo_vmd_wpd": "VMD+RLS + WPD",
+        "algo_emd_wpd": "EMD + WPD",
+        "algo_passthrough_sos": "Passthrough + SOS",
+        "ab_panel_label": "对比",
+        "ab_off": "关闭",
+        "btn_record_start": "🔴 记录",
+        "btn_record_stop": "⏹ 停止记录",
+        "debug_dsp_current": "[DSP Engine] Current: {} | Latency: {}ms | SNR_Gain: {:+.1f}dB",
+        "debug_dsp_ab": "[DSP Engine] A/B: {} | Latency: {}ms | SNR_Gain: {:+.1f}dB",
     },
 
     "en": {
@@ -237,6 +250,19 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "export_format_csv": "Export to CSV (Basic)",
         "export_format_hdf5": "Export to HDF5 (Research)",
         "export_format_edf": "Export to EDF (Clinical)",
+
+        # Algorithm control panel
+        "algo_panel_label": "Algorithm",
+        "algo_adaptive": "Adaptive",
+        "algo_vmd_wpd": "VMD+RLS + WPD",
+        "algo_emd_wpd": "EMD + WPD",
+        "algo_passthrough_sos": "Passthrough + SOS",
+        "ab_panel_label": "A/B",
+        "ab_off": "Off",
+        "btn_record_start": "🔴 Record",
+        "btn_record_stop": "⏹ Stop Recording",
+        "debug_dsp_current": "[DSP Engine] Current: {} | Latency: {}ms | SNR_Gain: {:+.1f}dB",
+        "debug_dsp_ab": "[DSP Engine] A/B: {} | Latency: {}ms | SNR_Gain: {:+.1f}dB",
     },
 }
 
