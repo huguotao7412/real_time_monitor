@@ -5,7 +5,7 @@ import time
 import numpy as np
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSplitter, QFrame,
-    QPushButton, QTextEdit,
+    QPushButton, QTextEdit, QComboBox,
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
@@ -29,6 +29,51 @@ class ResearchTab(QWidget):
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
+
+        # ── Algorithm Control Panel ──
+        algo_row = QHBoxLayout()
+        algo_row.setContentsMargins(0, 0, 0, 4)
+
+        algo_row.addWidget(QLabel(tr("algo_panel_label") + ":"))
+        self._algo_combo = QComboBox()
+        self._algo_combo.addItems([
+            tr("algo_adaptive"),
+            tr("algo_vmd_wpd"),
+            tr("algo_emd_wpd"),
+            tr("algo_passthrough_sos"),
+        ])
+        self._algo_combo.setCurrentIndex(0)
+        algo_row.addWidget(self._algo_combo)
+
+        algo_row.addSpacing(12)
+        algo_row.addWidget(QLabel(tr("ab_panel_label") + ":"))
+        self._ab_combo = QComboBox()
+        self._ab_combo.addItems([
+            tr("ab_off"),
+            tr("algo_vmd_wpd"),
+            tr("algo_emd_wpd"),
+            tr("algo_passthrough_sos"),
+        ])
+        self._ab_combo.setCurrentIndex(0)
+        algo_row.addWidget(self._ab_combo)
+
+        algo_row.addSpacing(12)
+        self._record_btn = QPushButton(tr("btn_record_start"))
+        self._record_btn.setStyleSheet(
+            "QPushButton { background-color: #e74c3c; color: white; font-weight: bold; "
+            "padding: 6px 16px; border-radius: 4px; font-size: 10pt; }"
+            "QPushButton:hover { background-color: #c0392b; }"
+        )
+        algo_row.addWidget(self._record_btn)
+
+        self._record_timer_label = QLabel("")
+        self._record_timer_label.setFont(QFont("Consolas", 10))
+        self._record_timer_label.setStyleSheet("color: #e74c3c;")
+        self._record_timer_label.setVisible(False)
+        algo_row.addWidget(self._record_timer_label)
+
+        algo_row.addStretch()
+        layout.addLayout(algo_row)
 
         # Waveforms
         wave_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -116,6 +161,43 @@ class ResearchTab(QWidget):
             tr("debug_expanded") if self._debug_expanded else tr("debug_collapsed")
         )
 
+    # ── Public API for MainWindow wiring ──
+
+    @property
+    def algo_selection(self) -> int:
+        return self._algo_combo.currentIndex()
+
+    @property
+    def ab_selection(self) -> int:
+        return self._ab_combo.currentIndex()
+
+    def set_recording_state(self, is_recording: bool) -> None:
+        """Update record button appearance and timer visibility."""
+        if is_recording:
+            self._record_btn.setText(tr("btn_record_stop"))
+            self._record_btn.setStyleSheet(
+                "QPushButton { background-color: #95a5a6; color: white; font-weight: bold; "
+                "padding: 6px 16px; border-radius: 4px; font-size: 10pt; }"
+            )
+            self._record_timer_label.setVisible(True)
+        else:
+            self._record_btn.setText(tr("btn_record_start"))
+            self._record_btn.setStyleSheet(
+                "QPushButton { background-color: #e74c3c; color: white; font-weight: bold; "
+                "padding: 6px 16px; border-radius: 4px; font-size: 10pt; }"
+            )
+            self._record_timer_label.setVisible(False)
+
+    def update_record_timer(self, elapsed_sec: float) -> None:
+        """Update the recording timer label."""
+        if elapsed_sec > 0:
+            h = int(elapsed_sec // 3600)
+            m = int((elapsed_sec % 3600) // 60)
+            s = int(elapsed_sec % 60)
+            self._record_timer_label.setText(f"{h:02d}:{m:02d}:{s:02d}")
+        else:
+            self._record_timer_label.setText("")
+
     def start(self) -> None:
         self._trend.start()
 
@@ -137,6 +219,8 @@ class ResearchTab(QWidget):
         heart_waveform: np.ndarray,
         quality: dict | None,
         sample_for_trend: bool = False,
+        dsp_telemetry: dict | None = None,
+        benchmark_elapsed: float = 0.0,
     ) -> None:
         # Waveforms
         if len(breath_waveform) > 0:
@@ -174,4 +258,18 @@ class ResearchTab(QWidget):
                 f"reason: {quality.get('reason', '')}",
                 f"SQI: {self._sqi_level}/3",
             ]
+            if dsp_telemetry:
+                algo = dsp_telemetry.get("current_algo", "--")
+                lat = dsp_telemetry.get("current_latency_ms", 0.0)
+                snr = dsp_telemetry.get("current_snr_gain_db", 0.0)
+                lines.append(
+                    tr("debug_dsp_current", algo, f"{lat:.0f}", snr)
+                )
+                if dsp_telemetry.get("ab_enabled"):
+                    ab_algo = dsp_telemetry.get("ab_algo", "--")
+                    ab_lat = dsp_telemetry.get("ab_latency_ms", 0.0)
+                    ab_snr = dsp_telemetry.get("ab_snr_gain_db", 0.0)
+                    lines.append(
+                        tr("debug_dsp_ab", ab_algo, f"{ab_lat:.0f}", ab_snr)
+                    )
             self._debug_panel.setText("  |  ".join(lines))
