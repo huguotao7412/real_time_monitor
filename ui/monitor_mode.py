@@ -13,6 +13,12 @@ from config.protocol import UI_REFRESH_MS, RANGE_HARDWARE_OFFSET_M, MIN_REAL_DIS
 from config.i18n import tr
 from models.radar_frame import RadarFrame, FrameHeader
 from dsp_pipeline.vital_signs import VitalSigns
+from dsp_pipeline.strategies import (
+    SignalCleanerStrategy, VitalSignSeparator,
+    VMDRLSCleaner, EMDHarmonicCleaner, PassthroughCleaner,
+    WPDSeparator, SOSFilterSeparator,
+)
+from utils.benchmark_logger import AlgorithmBenchmarker
 
 
 def _drain_queue(q) -> None:
@@ -110,6 +116,14 @@ class HRMode(MonitorMode):
         self._bpm_history: list[tuple[float, float, float]] = []
         self._sqi_history: list[dict] = []
 
+        # Strategy + benchmarker state (applied on next start())
+        self._pending_cleaner: SignalCleanerStrategy | None = None
+        self._pending_separator: VitalSignSeparator | None = None
+        self._pending_ab_cleaner: SignalCleanerStrategy | None = None
+        self._pending_ab_separator: VitalSignSeparator | None = None
+        self._use_adaptive: bool = True
+        self._benchmarker: AlgorithmBenchmarker | None = None
+
 
     # -- MonitorMode impl ------------------------------------------------
 
@@ -133,7 +147,19 @@ class HRMode(MonitorMode):
 
     def start(self) -> None:
         from dsp_pipeline.pipeline import Pipeline
-        self._pipeline = Pipeline()
+        cleaner = self._pending_cleaner or VMDRLSCleaner()
+        separator = self._pending_separator or WPDSeparator()
+        self._pipeline = Pipeline(
+            cleaner=cleaner,
+            separator=separator,
+            use_adaptive=self._use_adaptive,
+        )
+        if self._pending_ab_cleaner is not None and self._pending_ab_separator is not None:
+            self._pipeline.set_ab_strategy(
+                self._pending_ab_cleaner, self._pending_ab_separator
+            )
+        if self._benchmarker is not None:
+            self._pipeline.set_benchmarker(self._benchmarker)
         self._pipeline.start()
 
     def stop(self) -> None:
@@ -141,6 +167,73 @@ class HRMode(MonitorMode):
             _drain_queue(self._pipeline.display_queue)
             self._pipeline.stop()
             self._pipeline = None
+
+    # ── Strategy control ─────────────────────────────────────────
+
+    def set_strategies(
+        self, cleaner: SignalCleanerStrategy, separator: VitalSignSeparator,
+    ) -> None:
+        self._use_adaptive = False
+        self._pending_cleaner = cleaner
+        self._pending_separator = separator
+        if self._pipeline is not None:
+            self._pipeline.set_strategies(cleaner, separator)
+
+    def set_adaptive_mode(self) -> None:
+        self._use_adaptive = True
+        if self._pipeline is not None:
+            self._pipeline._use_adaptive = True
+
+    def set_ab_strategy(
+        self,
+        cleaner: SignalCleanerStrategy | None,
+        separator: VitalSignSeparator | None,
+    ) -> None:
+        self._pending_ab_cleaner = cleaner
+        self._pending_ab_separator = separator
+        if self._pipeline is not None:
+            self._pipeline.set_ab_strategy(cleaner, separator)
+
+    def toggle_benchmark(self) -> bool:
+        if self._benchmarker is None:
+            self._benchmarker = AlgorithmBenchmarker()
+        if self._benchmarker.is_recording:
+            self._benchmarker.stop()
+            return False
+        else:
+            self._benchmarker.start()
+            if self._pipeline is not None:
+                self._pipeline.set_benchmarker(self._benchmarker)
+            return True
+
+    def get_dsp_telemetry(self) -> dict:
+        if self._pipeline is None:
+            return {
+                "current_algo": "--",
+                "current_latency_ms": 0.0,
+                "current_snr_gain_db": 0.0,
+                "ab_algo": "",
+                "ab_latency_ms": 0.0,
+                "ab_snr_gain_db": 0.0,
+                "ab_enabled": False,
+            }
+        return {
+            "current_algo": self._pipeline._current_algo_name,
+            "current_latency_ms": self._pipeline._current_latency_ms,
+            "current_snr_gain_db": self._pipeline._current_snr_gain_db,
+            "ab_algo": self._pipeline._ab_algo_name,
+            "ab_latency_ms": self._pipeline._ab_latency_ms,
+            "ab_snr_gain_db": self._pipeline._ab_snr_gain_db,
+            "ab_enabled": self._pipeline._ab_enabled,
+        }
+
+    def get_benchmarker(self) -> AlgorithmBenchmarker | None:
+        return self._benchmarker
+
+    def get_benchmark_elapsed(self) -> float:
+        if self._benchmarker is None or not self._benchmarker.is_recording:
+            return 0.0
+        return time.time() - self._benchmarker._start_time
 
     def feed_frame(self, frame: RadarFrame) -> None:
         if self._pipeline is None:
@@ -193,6 +286,8 @@ class HRMode(MonitorMode):
         # Research tab
         self._trend_tick_counter += 1
         trend_sample = (self._trend_tick_counter % 20 == 0)
+        dsp_telemetry = self.get_dsp_telemetry()
+        benchmark_elapsed = self.get_benchmark_elapsed()
         research_tab.update_display(
             breath_bpm=self._latest_vitals.breath_bpm,
             heart_bpm=self._latest_vitals.heart_bpm,
@@ -200,6 +295,8 @@ class HRMode(MonitorMode):
             heart_waveform=self._latest_vitals.heart_waveform,
             quality=q,
             sample_for_trend=trend_sample,
+            dsp_telemetry=dsp_telemetry,
+            benchmark_elapsed=benchmark_elapsed,
         )
 
         # Waveform accumulation
