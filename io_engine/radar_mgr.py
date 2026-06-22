@@ -78,11 +78,8 @@ class RadarMgr:
         # Non-blocking read: just consume what's available, don't wait
         try:
             if self._ser.control_serial:
-                self._ser.control_serial.timeout = 0.05
-                while True:
-                    line = self._ser.control_serial.readline()
-                    if not line:
-                        break
+                while self._ser.control_serial.in_waiting > 0:
+                    self._ser.control_serial.readline()
         except Exception:
             pass
         return True  # Fire-and-forget for boot sequence

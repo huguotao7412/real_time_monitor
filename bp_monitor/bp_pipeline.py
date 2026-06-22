@@ -528,22 +528,6 @@ class BPPipeline:
         # window to recover into a valid network input in 1–2 s instead
         # of the full 5 s cold restart.
         # ================================================================
-        phase_offset = 0.0
-        if target_bin is not None and new_target_bin != target_bin and self._last_phase_ref is not None:
-            ref_bin, _ref_phase = self._last_phase_ref
-            # extract phase at the *same* latest frame for both bins
-            transition_idx = -self.STEP_FRAMES
-            old_complex = mean_bin_frame_rx[target_bin, transition_idx, :]
-            new_complex = mean_bin_frame_rx[new_target_bin, transition_idx, :]
-
-            old_phase = np.angle(old_complex[np.argmax(np.abs(old_complex))])
-            new_phase = np.angle(new_complex[np.argmax(np.abs(new_complex))])
-            raw_diff = np.angle(np.exp(1j * (old_phase - new_phase)))
-            phase_offset = raw_diff * FREQ_SCALE_60G_TO_24G
-            print(
-                f"[BPPipeline] Phase alignment: offset={phase_offset:.4f} rad"
-                f" (bin {target_bin} → {new_target_bin})"
-            )
 
         if target_bin is not None and new_target_bin != target_bin:
             transition_idx = -self.STEP_FRAMES

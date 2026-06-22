@@ -412,15 +412,12 @@ class Pipeline:
         diff_phase = np.abs(np.diff(unwrapped))
         MA_THRESHOLD = 0.8  # 可视实际波长调节（rad/frame），24GHz或77GHz表现不同
 
-        raw_last_phase = unwrapped[-1]
-
         if np.any(diff_phase > MA_THRESHOLD):
             # 引入快速 Hampel 滤波（局部中值异常点剔除）
             window_size = 5
             pad_width = window_size // 2
             padded = np.pad(unwrapped, pad_width, mode='edge')
 
-            # 使用 numpy strides 加速滑动窗口中值计算
             shape = (len(unwrapped), window_size)
             strides = (padded.strides[0], padded.strides[0])
             windows = np.lib.stride_tricks.as_strided(padded, shape=shape, strides=strides)
@@ -428,11 +425,10 @@ class Pipeline:
             local_medians = np.median(windows, axis=1)
             local_mads = np.median(np.abs(windows - local_medians[:, None]), axis=1)
 
-            # 识别异常点并用局部中值替换
             outliers = np.abs(unwrapped - local_medians) > (3 * local_mads)
             unwrapped[outliers] = local_medians[outliers]
 
-        self._last_unwrapped_phase = raw_last_phase
+        self._last_unwrapped_phase = unwrapped[-1]
         return remove_dc(unwrapped)
 
     def _advanced_dsp_path(
@@ -832,4 +828,7 @@ class Pipeline:
                 self.display_queue.get_nowait()
             except queue.Empty:
                 pass
-            self.display_queue.put_nowait(vitals)
+            try:
+                self.display_queue.put_nowait(vitals)
+            except queue.Full:
+                pass
