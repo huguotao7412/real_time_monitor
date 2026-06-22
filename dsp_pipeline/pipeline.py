@@ -18,6 +18,8 @@ from config.protocol import (
     DSP_STARTUP_SEC, MUSIC_UPDATE_SEC, EMD_MAX_IMF, FFT_N_BREATH, FFT_N_HEART,
     SQI_RECENT_SEC, PHASE_RANGE_MIN_NORMAL, BREATH_RATIO_MIN,
     CFAR_RESCAN_MIN_FRAMES, SAVGOL_WINDOW_LENGTH, SAVGOL_POLYORDER,
+    ADAPTIVE_HIGH_PHASE_THRESHOLD, ADAPTIVE_LOW_PHASE_THRESHOLD,
+    ADAPTIVE_HIGH_SNR_DB, ADAPTIVE_LOW_SNR_DB, ADAPTIVE_EVAL_INTERVAL,
     WELCH_NPERSEG, HEART_KALMAN_HISTORY_MAXLEN
 )
 from models.radar_frame import RadarFrame
@@ -30,16 +32,51 @@ from dsp_pipeline.fft_bpm import estimate_bpm, kalman_smooth, estimate_breath_bp
 from dsp_pipeline.music_angle import estimate_angle_music
 from dsp_pipeline.lcmv_beamformer import lcmv_displacement
 from dsp_pipeline.smoothers import SmootherState, apply_smoothing_chain, compute_sqi
+from dsp_pipeline.strategies import (
+    SignalCleanerStrategy, VitalSignSeparator,
+    VMDRLSCleaner, EMDHarmonicCleaner, PassthroughCleaner,
+    WPDSeparator, SOSFilterSeparator,
+    AdaptiveStrategySelector,
+)
+from utils.benchmark_logger import AlgorithmBenchmarker, BenchmarkRecord
 
 
 class Pipeline:
     _MUSIC_CHANNELS = BEAMFORMING_RX_CHANNELS
-    def __init__(self, use_beamforming: bool = True):
+    def __init__(
+        self,
+        use_beamforming: bool = True,
+        cleaner: SignalCleanerStrategy | None = None,
+        separator: VitalSignSeparator | None = None,
+        use_adaptive: bool = True,
+    ):
         self.raw_queue = queue.Queue(maxsize=RAW_QUEUE_MAXSIZE)
         self.display_queue = queue.Queue(maxsize=DISPLAY_QUEUE_MAXSIZE)
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._frame_count = 0
+
+        # Strategy injection — defaults preserve current VMD+RLS → WPD behavior
+        self._cleaner: SignalCleanerStrategy = cleaner or VMDRLSCleaner()
+        self._separator: VitalSignSeparator = separator or WPDSeparator()
+        self._current_algo_name: str = "Adaptive"
+        self._current_latency_ms: float = 0.0
+        self._current_snr_gain_db: float = 0.0
+
+        # Adaptive routing (replaces _use_advanced_dsp flag)
+        self._use_adaptive = use_adaptive
+        self._adaptive_selector: AdaptiveStrategySelector | None = (
+            AdaptiveStrategySelector(
+                light=(PassthroughCleaner(), SOSFilterSeparator()),
+                standard=(VMDRLSCleaner(), WPDSeparator()),
+                heavy=(EMDHarmonicCleaner(), WPDSeparator()),
+                evaluation_interval=ADAPTIVE_EVAL_INTERVAL,
+                high_phase_threshold=ADAPTIVE_HIGH_PHASE_THRESHOLD,
+                low_phase_threshold=ADAPTIVE_LOW_PHASE_THRESHOLD,
+                high_snr_db=ADAPTIVE_HIGH_SNR_DB,
+                low_snr_db=ADAPTIVE_LOW_SNR_DB,
+            ) if use_adaptive else None
+        )
 
         # Per-RX complex buffer (replaces scalar _phase_buffer for beamforming)
         self._rx_buffer: deque[np.ndarray] = deque(maxlen=WINDOW_SIZE)
@@ -62,7 +99,6 @@ class Pipeline:
 
         # Feature toggles
         self._use_beamforming = use_beamforming
-        self._use_advanced_dsp: bool = True  # Step 2: EMD + WPD + STFT
 
         # Beamforming state
         self._angle_deg: float = 0.0  # initial guess: boresight
@@ -97,8 +133,6 @@ class Pipeline:
         self._heart_ema: float = 0.0
 
         # 自适应 Kalman: 心率 prominence 历史
-
-        # 自适应 Kalman: 心率 prominence 历史
         self._heart_prominence_history: list[float] = []
 
         # Cached advanced-DSP waveforms for display between BPM updates
@@ -108,10 +142,20 @@ class Pipeline:
         # Phase unwrapping continuity state (prevents 2π jumps across sliding windows)
         self._last_unwrapped_phase: float | None = None
 
-        # [新增] 异步 DSP 线程池
-        self._dsp_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        self._dsp_future = None
+        # ── Async DSP + A/B ──
+        self._dsp_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+        self._dsp_future: concurrent.futures.Future | None = None
+        self._ab_enabled: bool = False
+        self._ab_cleaner: SignalCleanerStrategy | None = None
+        self._ab_separator: VitalSignSeparator | None = None
+        self._ab_future: concurrent.futures.Future | None = None
+        self._ab_algo_name: str = ""
+        self._ab_latency_ms: float = 0.0
+        self._ab_snr_gain_db: float = 0.0
         self._pending_displacement = None
+
+        # ── Benchmarker ──
+        self._benchmarker: AlgorithmBenchmarker | None = None
 
     @property
     def calibration_done(self) -> bool:
@@ -371,36 +415,33 @@ class Pipeline:
         return remove_dc(unwrapped)
 
     def _advanced_dsp_path(
-        self, displacement: np.ndarray
-    ) -> tuple[np.ndarray, np.ndarray, float, float]:
-        """SOS → WPD (breath: SOS only, heart: diff+WPD) → BPM. MATLAB PhaseProcess port."""
-        # SOS pre-filter (MATLAB: filterObj.apply_all_filter)
+        self, displacement: np.ndarray,
+        cleaner: SignalCleanerStrategy | None = None,
+        separator: VitalSignSeparator | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, float, float, float, dict]:
+        """SOS → Cleaner → Separator → BPM. Returns 6-tuple with metrics.
+
+        Strategy objects handle their own errors internally — no try/except needed.
+        """
+        use_cleaner = cleaner if cleaner is not None else self._cleaner
+        use_sep = separator if separator is not None else self._separator
+
+        # SOS pre-filter
         try:
             filted = sosfiltfilt(self._filter.sos_all, displacement)
         except Exception:
             filted = displacement.copy()
 
-        # Breath: 跳过 WPD，直接用 SOS 带通 (呼吸能量强，无需小波重建)
-        breath_wave = self._filter.filter_breath(filted)
-        breath_wave = breath_wave[1:]  # MATLAB: sig_enhanced_nodiff = FiltedData(2:end)
+        # Cleaner (harmonic removal)
+        clean_disp, clean_metrics = use_cleaner.clean(filted, FS_HZ)
 
-        # Heart: diff → WPD sym8 (MATLAB: sig_heart_pre = diff(FiltedData); wpdec(sig_heart_pre))
-        # Heart: diff → WPD sym8
-        from dsp_pipeline.vmd_rls_cleaner import vmd_rls_harmonic_clean
-        from dsp_pipeline.wpd_filter import wpd_separate
-        try:
-            # 【核心创新】基于 VMD 和 RLS 自适应追踪消除非平稳呼吸谐波
-            clean_disp = vmd_rls_harmonic_clean(filted, FS_HZ, harmonics=[2, 3, 4])
-            heart_diff = np.diff(clean_disp)
-            _, heart_wave = wpd_separate(
-                clean_disp, FS_HZ, heart_input_signal=heart_diff
-            )
-        except Exception as e:  # 必须将异常捕获为 e
-            print(f"[Advanced DSP] WPD Fallback triggered: {e}")
-            enhanced = savgol_filter(filted, window_length=9, polyorder=3, deriv=1)
-            heart_wave = self._filter.filter_heart(enhanced)
+        # Separator (breath / heart)
+        heart_diff = np.diff(clean_disp)
+        breath_wave, heart_wave, sep_metrics = use_sep.separate(
+            clean_disp, FS_HZ, heart_input_signal=heart_diff,
+        )
 
-        # BPM estimation: FFT breath + STFT heart (MATLAB PhaseProcess port)
+        # BPM estimation
         heart_prominence = 0.1
         try:
             breath_bpm, heart_bpm, heart_prominence = estimate_bpm_stft(
@@ -417,10 +458,18 @@ class Pipeline:
                 breath_bpm = estimate_breath_bpm_time_domain(breath_wave, FS_HZ)
             f0 = breath_bpm / 60.0 if breath_bpm > 0 else 0.0
             heart_bpm, heart_prominence = estimate_bpm(
-                heart_wave, FS_HZ, (0.8, 2.0), f0=f0
+                heart_wave, FS_HZ, (0.8, 2.0), f0=f0,
             )
 
-        return breath_wave, heart_wave, breath_bpm, heart_bpm, heart_prominence
+        # Combine metrics
+        combined = {
+            **clean_metrics,
+            **sep_metrics,
+            "breath_bpm": breath_bpm,
+            "heart_bpm": heart_bpm,
+            "heart_prominence": heart_prominence,
+        }
+        return breath_wave, heart_wave, breath_bpm, heart_bpm, heart_prominence, combined
 
     def _shared_signal_chain(
             self, displacement: np.ndarray | None, update_bpm: bool
@@ -475,83 +524,117 @@ class Pipeline:
         heart_signal_display = heart_signal
 
         if update_bpm:
-            if self._use_advanced_dsp:
-                # 1. 检查上一次的异步计算是否完成
-                if self._dsp_future is not None and self._dsp_future.done():
-                    try:
-                        adv_breath, adv_heart, adv_breath_bpm, adv_heart_bpm, adv_heart_prom = self._dsp_future.result()
+            # ── Run AdaptiveSelector if enabled ──
+            if self._use_adaptive and self._adaptive_selector is not None:
+                self._cleaner, self._separator = self._adaptive_selector.select(
+                    phase_range=recent_phase_range,
+                    snr_db=self._current_bin_snr,
+                )
+                cname = self._cleaner.clean(np.array([0.0]), FS_HZ)[1].get("algorithm", "?")
+                sname = self._separator.separate(np.array([0.0, 0.1]), FS_HZ)[2].get("algorithm", "?")
+                self._current_algo_name = f"{cname}+{sname}"
 
-                        breath_signal_display = adv_breath
-                        heart_signal_display = adv_heart
-                        breath_bpm = adv_breath_bpm
-                        heart_bpm_raw = adv_heart_bpm
+            # ── Primary strategy: check async result then dispatch new ──
+            if self._dsp_future is not None and self._dsp_future.done():
+                try:
+                    (adv_breath, adv_heart, adv_breath_bpm, adv_heart_bpm,
+                     adv_heart_prom, adv_metrics) = self._dsp_future.result()
 
-                        # [保留原有逻辑] 中值去飞点 → Kalman 平滑 → EMA 稳显示
-                        if breath_bpm > 0:
-                            self._breath_raw_history.append(breath_bpm)
-                            sqi_val = compute_sqi(recent_phase_range, breath_power_ratio, self._current_bin_snr)
-                            breath_bpm = apply_smoothing_chain(self._breath_smoother, breath_bpm,
-                                                               recent_phase_range, breath_power_ratio,
-                                                               self._current_bin_snr)
-                            self._last_valid_breath_bpm = breath_bpm
+                    breath_signal_display = adv_breath
+                    heart_signal_display = adv_heart
+                    breath_bpm = adv_breath_bpm
+                    heart_bpm_raw = adv_heart_bpm
 
-                        if heart_bpm_raw > 0:
-                            self._heart_prominence_history.append(adv_heart_prom)
-                            if len(self._heart_prominence_history) > HEART_KALMAN_HISTORY_MAXLEN * 2:
-                                self._heart_prominence_history = self._heart_prominence_history[
-                                    -HEART_KALMAN_HISTORY_MAXLEN * 2:]
+                    self._current_latency_ms = adv_metrics.get("latency_ms", 0.0)
+                    self._current_snr_gain_db = adv_metrics.get("snr_estimate_db", 0.0) or 0.0
 
-                            # ── 异常跳变拒绝 (Outlier Rejection) ──
-                            heart_bpm_accepted = True
-                            if self._last_valid_heart_bpm > 0:
-                                bpm_jump = abs(heart_bpm_raw - self._last_valid_heart_bpm)
-                                if bpm_jump > 20.0 and adv_heart_prom < 0.3:
-                                    heart_bpm_accepted = False
+                    if breath_bpm > 0:
+                        self._breath_raw_history.append(breath_bpm)
+                        sqi_val = compute_sqi(recent_phase_range, breath_power_ratio, self._current_bin_snr)
+                        breath_bpm = apply_smoothing_chain(self._breath_smoother, breath_bpm,
+                                                           recent_phase_range, breath_power_ratio,
+                                                           self._current_bin_snr)
+                        self._last_valid_breath_bpm = breath_bpm
 
-                            if heart_bpm_accepted:
-                                if HEART_USE_NEW_SMOOTHER:
-                                    self._heart_raw_history.append(heart_bpm_raw)
-                                    heart_bpm = apply_smoothing_chain(self._heart_smoother, heart_bpm_raw,
-                                                                      recent_phase_range, breath_power_ratio,
-                                                                      self._current_bin_snr)
-                                    self._last_valid_heart_bpm = heart_bpm
-                                else:
-                                    self._heart_raw_history.append(heart_bpm_raw)
-                                    heart_bpm_raw_median = float(np.median(list(self._heart_raw_history)))
-                                    self._heart_history.append(heart_bpm_raw_median)
-                                    if len(self._heart_history) > HEART_KALMAN_HISTORY_MAXLEN:
-                                        self._heart_history = self._heart_history[-HEART_KALMAN_HISTORY_MAXLEN:]
-                                    prom_slice = self._heart_prominence_history[-len(self._heart_history):]
-                                    heart_bpm = kalman_smooth(
-                                        self._heart_history, q=1e-3, r=0.5,
-                                        prominences=prom_slice)
-                                    self._last_valid_heart_bpm = heart_bpm
+                    if heart_bpm_raw > 0:
+                        self._heart_prominence_history.append(adv_heart_prom)
+                        if len(self._heart_prominence_history) > HEART_KALMAN_HISTORY_MAXLEN * 2:
+                            self._heart_prominence_history = self._heart_prominence_history[
+                                -HEART_KALMAN_HISTORY_MAXLEN * 2:]
+
+                        heart_bpm_accepted = True
+                        if self._last_valid_heart_bpm > 0:
+                            bpm_jump = abs(heart_bpm_raw - self._last_valid_heart_bpm)
+                            if bpm_jump > 20.0 and adv_heart_prom < 0.3:
+                                heart_bpm_accepted = False
+
+                        if heart_bpm_accepted:
+                            if HEART_USE_NEW_SMOOTHER:
+                                self._heart_raw_history.append(heart_bpm_raw)
+                                heart_bpm = apply_smoothing_chain(self._heart_smoother, heart_bpm_raw,
+                                                                  recent_phase_range, breath_power_ratio,
+                                                                  self._current_bin_snr)
+                                self._last_valid_heart_bpm = heart_bpm
                             else:
-                                heart_bpm = self._last_valid_heart_bpm
-                        self._cached_breath_wave = adv_breath
-                        self._cached_heart_wave = adv_heart
-                    except Exception as e:
-                        print(f"[DSP] Async advanced path failed: {e}")
-                        self._use_advanced_dsp = False
+                                self._heart_raw_history.append(heart_bpm_raw)
+                                heart_bpm_raw_median = float(np.median(list(self._heart_raw_history)))
+                                self._heart_history.append(heart_bpm_raw_median)
+                                if len(self._heart_history) > HEART_KALMAN_HISTORY_MAXLEN:
+                                    self._heart_history = self._heart_history[-HEART_KALMAN_HISTORY_MAXLEN:]
+                                prom_slice = self._heart_prominence_history[-len(self._heart_history):]
+                                heart_bpm = kalman_smooth(
+                                    self._heart_history, q=1e-3, r=0.5,
+                                    prominences=prom_slice)
+                                self._last_valid_heart_bpm = heart_bpm
+                        else:
+                            heart_bpm = self._last_valid_heart_bpm
 
-                # 2. 如果当前没有正在计算的任务，派发新的计算任务给线程池
-                if self._dsp_future is None or self._dsp_future.done():
-                    # 注意使用 .copy()，避免后台线程处理时主线程覆盖了缓冲区
-                    self._dsp_future = self._dsp_executor.submit(
-                        self._advanced_dsp_path, displacement.copy()
-                    )
+                    self._cached_breath_wave = adv_breath
+                    self._cached_heart_wave = adv_heart
 
-                # 3. 在计算期间，维持使用上一次的有效心率和呼吸数据显示
-                breath_bpm = self._last_valid_breath_bpm
-                heart_bpm = self._last_valid_heart_bpm
-                if self._cached_breath_wave is not None:
-                    breath_signal_display = self._cached_breath_wave
-                    heart_signal_display = self._cached_heart_wave
+                    # ── Benchmark log (primary) ──
+                    self._log_benchmark(adv_metrics, displacement, phase_range, is_primary=True)
 
-            # [完全保留] 基础/降级处理路径
-            if not self._use_advanced_dsp or breath_bpm <= 0:
+                except Exception as e:
+                    print(f"[DSP] Async advanced path failed: {e}")
+
+            # Dispatch new primary task if idle
+            if self._dsp_future is None or self._dsp_future.done():
+                self._dsp_future = self._dsp_executor.submit(
+                    self._advanced_dsp_path, displacement.copy(),
+                    self._cleaner, self._separator,
+                )
+
+            # ── A/B comparison: check result then dispatch ──
+            if self._ab_enabled:
+                if self._ab_future is not None and self._ab_future.done():
+                    try:
+                        (_, _, _, _, _, ab_metrics) = self._ab_future.result()
+                        self._ab_algo_name = ab_metrics.get("algorithm", "?")
+                        self._ab_latency_ms = ab_metrics.get("latency_ms", 0.0)
+                        self._ab_snr_gain_db = ab_metrics.get("snr_estimate_db", 0.0) or 0.0
+                        self._log_benchmark(ab_metrics, displacement, phase_range, is_primary=False)
+                    except Exception:
+                        pass
+
+                if self._ab_future is None or self._ab_future.done():
+                    if self._ab_cleaner is not None and self._ab_separator is not None:
+                        self._ab_future = self._dsp_executor.submit(
+                            self._advanced_dsp_path, displacement.copy(),
+                            self._ab_cleaner, self._ab_separator,
+                        )
+
+            # Maintain last valid BPMs while computing
+            breath_bpm = self._last_valid_breath_bpm
+            heart_bpm = self._last_valid_heart_bpm
+            if self._cached_breath_wave is not None:
+                breath_signal_display = self._cached_breath_wave
+                heart_signal_display = self._cached_heart_wave
+
+            # ── Fallback baseline path (when adaptive off and BPM invalid) ──
+            if not self._use_adaptive and breath_bpm <= 0:
                 breath_bpm = estimate_breath_bpm_time_domain(
-                    no_dc, fs=FS_HZ, min_interval_sec=1.0
+                    no_dc, fs=FS_HZ, min_interval_sec=1.0,
                 )
                 if breath_bpm <= 0:
                     breath_bpm, _ = estimate_bpm(
@@ -568,7 +651,7 @@ class Pipeline:
 
                 f0 = breath_bpm / 60.0 if breath_bpm > 0 else 0.0
                 heart_bpm_raw, prominence = estimate_bpm(
-                    heart_signal, FS_HZ, (0.8, 2.0), f0=f0
+                    heart_signal, FS_HZ, (0.8, 2.0), f0=f0,
                 )
                 if heart_bpm_raw > 0:
                     self._heart_prominence_history.append(prominence)
@@ -598,7 +681,8 @@ class Pipeline:
                             prom_slice = self._heart_prominence_history[-len(self._heart_history):]
                             heart_bpm = kalman_smooth(
                                 self._heart_history, q=1e-3, r=0.5,
-                                prominences=prom_slice)
+                                prominences=prom_slice,
+                            )
                             self._last_valid_heart_bpm = heart_bpm
                     else:
                         heart_bpm = self._last_valid_heart_bpm
@@ -633,6 +717,73 @@ class Pipeline:
             heart_waveform=heart_signal_display,
             quality=quality,
         )
+
+    # ── Strategy hot-swap API ──────────────────────────────────
+
+    def set_strategies(
+        self, cleaner: SignalCleanerStrategy, separator: VitalSignSeparator
+    ) -> None:
+        """Hot-swap primary strategies. Takes effect on next update_bpm dispatch."""
+        self._cleaner = cleaner
+        self._separator = separator
+        self._use_adaptive = False  # manual override disables adaptive
+        cname = cleaner.clean(np.array([0.0]), FS_HZ)[1].get("algorithm", "?")
+        sname = separator.separate(np.array([0.0, 0.1]), FS_HZ)[2].get("algorithm", "?")
+        self._current_algo_name = f"{cname}+{sname}"
+
+    def set_ab_strategy(
+        self,
+        cleaner: SignalCleanerStrategy | None,
+        separator: VitalSignSeparator | None,
+    ) -> None:
+        """Set or disable A/B comparison strategy. None disables."""
+        self._ab_cleaner = cleaner
+        self._ab_separator = separator
+        self._ab_enabled = (cleaner is not None and separator is not None)
+
+    @property
+    def benchmarker(self) -> AlgorithmBenchmarker | None:
+        return self._benchmarker
+
+    def set_benchmarker(self, benchmarker: AlgorithmBenchmarker | None) -> None:
+        self._benchmarker = benchmarker
+
+    def _log_benchmark(
+        self, metrics: dict, displacement: np.ndarray, phase_range_val: float,
+        is_primary: bool,
+    ) -> None:
+        """Build and enqueue a BenchmarkRecord if recording is active."""
+        if self._benchmarker is None or not self._benchmarker.is_recording:
+            return
+        try:
+            input_pr = float(np.max(displacement) - np.min(displacement))
+        except Exception:
+            input_pr = 0.0
+        record = BenchmarkRecord(
+            timestamp=time.time(),
+            frame_index=self._frame_count,
+            elapsed_sec=self._frame_count / FS_HZ,
+            algorithm_name=metrics.get("algorithm",
+                         self._current_algo_name if is_primary else self._ab_algo_name),
+            is_primary=is_primary,
+            latency_ms=metrics.get("latency_ms", 0.0),
+            input_phase_range=input_pr,
+            input_snr_db=metrics.get("snr_estimate_db"),
+            output_phase_range=phase_range_val,
+            output_snr_db=None,
+            snr_gain_db=None,
+            breath_bpm=metrics.get("breath_bpm", 0.0),
+            heart_bpm=metrics.get("heart_bpm", 0.0),
+            heart_prominence=metrics.get("heart_prominence", 0.0),
+            imf_count=metrics.get("imf_count"),
+            convergence_iter=metrics.get("convergence_iter"),
+            retained_harmonics=(
+                ",".join(str(h) for h in metrics["retained_harmonics"])
+                if metrics.get("retained_harmonics") else None
+            ),
+            dominant_freq_hz=metrics.get("dominant_freq_hz"),
+        )
+        self._benchmarker.log(record)
 
     def _check_quality(self, signal: np.ndarray) -> dict:
         from scipy.signal import welch
