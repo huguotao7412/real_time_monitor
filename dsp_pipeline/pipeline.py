@@ -385,11 +385,12 @@ class Pipeline:
         breath_wave = breath_wave[1:]  # MATLAB: sig_enhanced_nodiff = FiltedData(2:end)
 
         # Heart: diff → WPD sym8 (MATLAB: sig_heart_pre = diff(FiltedData); wpdec(sig_heart_pre))
-        from dsp_pipeline.emd_cleaner import emd_harmonic_clean
+        # Heart: diff → WPD sym8
+        from dsp_pipeline.vmd_rls_cleaner import vmd_rls_harmonic_clean
         from dsp_pipeline.wpd_filter import wpd_separate
         try:
-            # 清除 displacement 中的呼吸谐波后再提取心率
-            clean_disp = emd_harmonic_clean(filted, FS_HZ, max_imf=EMD_MAX_IMF)
+            # 【核心创新】基于 VMD 和 RLS 自适应追踪消除非平稳呼吸谐波
+            clean_disp = vmd_rls_harmonic_clean(filted, FS_HZ, harmonics=[2, 3, 4])
             heart_diff = np.diff(clean_disp)
             _, heart_wave = wpd_separate(
                 clean_disp, FS_HZ, heart_input_signal=heart_diff
