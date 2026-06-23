@@ -54,13 +54,11 @@ def extract_bp(
         print(f"[extract_bp] FAIL: need >=3 peaks and >=3 valleys")
         return np.nan, np.nan, info
 
-    # MATLAB: pks_sorted = sort(pks, 'ascend'); SBP = max(pks_sorted(2:end-1)) - 10
-    pks_sorted = np.sort(wf[peaks])
-    sbp = float(np.max(pks_sorted[1:-1]) - 10.0)
+        # 提取所有收缩期峰值的中位数
+    sbp = float(np.median(wf[peaks]))
 
-    # MATLAB: vlys_sorted = sort(vlys, 'ascend'); DBP = min(vlys_sorted(2:end-1)) - 20
-    vlys_sorted = np.sort(wf[valleys])
-    dbp = float(np.min(vlys_sorted[1:-1]) - 20.0)
+        # 提取所有舒张期谷值的中位数
+    dbp = float(np.median(wf[valleys]))
 
     info["confidence"] = min(1.0, min(len(peaks), len(valleys)) / 10.0)
 
