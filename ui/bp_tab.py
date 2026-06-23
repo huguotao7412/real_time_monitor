@@ -4,8 +4,10 @@ import time
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame
-from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QPushButton, QComboBox,
+)
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
 
 from ui.subject_tab import HeartBeatIcon
@@ -75,9 +77,15 @@ class BPTab(QWidget):
 
     Layout:
       - SBP / DBP large numbers (red/blue)
+      - Calibration control row (button + profile combo)
       - SBP/DBP trend scatter plot (pyqtgraph)
       - Bottom info bar: distance, confidence, time since last update
     """
+
+    # Signals
+    calibrate_clicked = pyqtSignal()
+    profile_changed = pyqtSignal(str)       # selected profile name ("" = deselect)
+    profile_add_requested = pyqtSignal()   # "New User..." selected
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -105,6 +113,41 @@ class BPTab(QWidget):
         bp_row.addWidget(self._dbp_panel)
         bp_row.addStretch()
         layout.addLayout(bp_row)
+
+        # --- Calibration control row ---
+        calib_row = QHBoxLayout()
+        calib_row.setContentsMargins(0, 8, 0, 4)
+
+        self.btn_calibrate = QPushButton(tr("btn_calibrate"))
+        self.btn_calibrate.setStyleSheet(
+            "QPushButton { background-color: #8e44ad; color: white; font-weight: bold; "
+            "padding: 6px 16px; border-radius: 4px; font-size: 10pt; }"
+            "QPushButton:hover { background-color: #9b59b6; }"
+        )
+        self.btn_calibrate.clicked.connect(self.calibrate_clicked.emit)
+        calib_row.addWidget(self.btn_calibrate)
+
+        calib_row.addSpacing(12)
+
+        user_label = QLabel(tr("lbl_current_user"))
+        user_label.setFont(QFont("Segoe UI", 9))
+        user_label.setStyleSheet("color: #95a5a6;")
+        calib_row.addWidget(user_label)
+
+        self.profile_combo = QComboBox()
+        self.profile_combo.setMinimumWidth(120)
+        self.profile_combo.currentIndexChanged.connect(self._on_profile_combo_changed)
+        calib_row.addWidget(self.profile_combo)
+
+        calib_row.addStretch()
+        layout.addLayout(calib_row)
+
+        # Populate combo initially
+        self._refresh_profile_combo()
+
+        # Listen for external profile changes
+        from config.calibration_mgr import CalibrationMgr
+        CalibrationMgr.instance().profile_changed.connect(self._refresh_profile_combo)
 
         # --- Separator ---
         sep = QFrame()
@@ -181,6 +224,8 @@ class BPTab(QWidget):
         self._dist_label.setText(
             tr("bp_dist_label") if tr("bp_dist_label") != "bp_dist_label" else "Distance: --"
         )
+        self.btn_calibrate.setText(tr("btn_calibrate"))
+        self._refresh_profile_combo()
 
     def update_display(self, bp_result) -> None:
         """Accept BPResult and refresh all UI elements."""
@@ -239,6 +284,39 @@ class BPTab(QWidget):
         self._update_label.setText(
             f"Updated {now - r.timestamp:.0f}s ago"
         )
+
+    def _refresh_profile_combo(self) -> None:
+        """Rebuild profile combo from CalibrationMgr. Preserves selection."""
+        from config.calibration_mgr import CalibrationMgr
+        mgr = CalibrationMgr.instance()
+        active = mgr.active_profile_name
+
+        self.profile_combo.blockSignals(True)
+        self.profile_combo.clear()
+        self.profile_combo.addItem(tr("lbl_no_profile_selected"))  # index 0
+        for i, p in enumerate(mgr.profiles):
+            self.profile_combo.addItem(p["user_name"])
+            if p["user_name"] == active:
+                self.profile_combo.setCurrentIndex(i + 1)  # offset by 1 for "-- None --"
+        self.profile_combo.addItem(tr("lbl_new_user"))  # last item
+        self.profile_combo.blockSignals(False)
+
+        # If no profile matched, select "-- None --"
+        if active is None:
+            self.profile_combo.setCurrentIndex(0)
+
+    def _on_profile_combo_changed(self, index: int) -> None:
+        """Handle profile combo selection."""
+        if index == 0:
+            # "-- None --" selected
+            self.profile_changed.emit("")  # empty = deselect
+        elif index == self.profile_combo.count() - 1:
+            # "New User..." selected
+            self.profile_add_requested.emit()
+        else:
+            name = self.profile_combo.currentText()
+            if name:
+                self.profile_changed.emit(name)
 
     def reset_display(self) -> None:
         """Clear all BP values to '--' state."""
