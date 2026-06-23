@@ -415,13 +415,15 @@ class BPMode(MonitorMode):
             data_cube=rx_combined.reshape(32, 1, 1),
         )
 
-    def start(self) -> None:
+    def start(self, calib_sbp: float = 0.0, calib_dbp: float = 0.0) -> None:
+        """Create and start BP pipeline, optionally injecting calibration offsets."""
         from bp_monitor.bp_pipeline import BPPipeline
         cleaner = self._pending_cleaner or EMDPulseCleaner()
         self._pipeline = BPPipeline(
             "bp_matlab/bp_weights.mat",
             cleaner=cleaner,
         )
+        self._pipeline.set_calibration(calib_sbp, calib_dbp)
         if self._pending_ab_cleaner is not None:
             self._pipeline.set_ab_strategy(self._pending_ab_cleaner)
         if self._benchmarker is not None:
@@ -547,6 +549,25 @@ class BPMode(MonitorMode):
             "csv_rows": list(self._csv_rows),
             "bp_results": list(self._bp_results),
         }
+
+    def get_recent_bp_avg(self, seconds: float = 5.0) -> tuple[float | None, float | None]:
+        """Return mean SBP/DBP from _bp_results within the last N seconds.
+
+        Returns (None, None) if no valid data in the window.
+        """
+        now = time.time()
+        cutoff = now - seconds
+        sbp_vals = []
+        dbp_vals = []
+        for r in self._bp_results:
+            if r.timestamp >= cutoff:
+                if not np.isnan(r.sbp):
+                    sbp_vals.append(r.sbp)
+                if not np.isnan(r.dbp):
+                    dbp_vals.append(r.dbp)
+        if not sbp_vals or not dbp_vals:
+            return None, None
+        return float(np.mean(sbp_vals)), float(np.mean(dbp_vals))
 
     def clear_data(self) -> None:
         self._bp_results.clear()
