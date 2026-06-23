@@ -11,6 +11,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
 
 from ui.subject_tab import HeartBeatIcon
+from ui.calibration_overlay import CalibrationOverlay
 from config.i18n import tr, I18n
 
 
@@ -98,6 +99,15 @@ class BPTab(QWidget):
         self._trend_dbp: list[float] = []
 
         self._setup_ui()
+
+        # 10-second countdown overlay for calibration sampling
+        self.overlay = CalibrationOverlay(self)
+        self.overlay.setVisible(False)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, 'overlay'):
+            self.overlay.resize(self.size())
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)

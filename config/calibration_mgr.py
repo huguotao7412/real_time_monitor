@@ -6,6 +6,7 @@ Survives mode hot-switches because it lives outside algorithm instances.
 
 import json
 import os
+import copy
 from datetime import datetime
 from pathlib import Path
 
@@ -218,7 +219,7 @@ class CalibrationMgr(QObject):
     def _load(self) -> None:
         """Load from JSON. Gracefully degrade if file missing or corrupt."""
         if not STORAGE_PATH.exists():
-            self._data = dict(EMPTY_STATE)  # shallow copy
+            self._data = copy.deepcopy(EMPTY_STATE)  # [修改] 使用深拷贝防止内存污染全局状态
             return
         try:
             with open(STORAGE_PATH, "r", encoding="utf-8") as f:
@@ -233,7 +234,7 @@ class CalibrationMgr(QObject):
             }
         except (json.JSONDecodeError, ValueError, OSError) as e:
             print(f"[CalibrationMgr] Failed to load {STORAGE_PATH}: {e}")
-            self._data = dict(EMPTY_STATE)
+            self._data = copy.deepcopy(EMPTY_STATE)  # [修改] 使用深拷贝
 
     def _save(self) -> None:
         """Write current state to JSON file atomically."""

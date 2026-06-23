@@ -1,6 +1,7 @@
 """Ring progress overlay shown during 10-second calibration phase,
 and CalibrationDialog for user-driven BP baseline calibration."""
 
+import math
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QSpinBox, QDialog, QFrame,
@@ -131,7 +132,11 @@ class CalibrationDialog(QDialog):
     # ── internal state ──────────────────────────────────────────
 
     def _has_valid_measurements(self) -> bool:
-        return self._measured_sbp is not None and self._measured_dbp is not None
+        if self._measured_sbp is None or self._measured_dbp is None:
+            return False
+        if math.isnan(self._measured_sbp) or math.isnan(self._measured_dbp):
+            return False
+        return True
 
     def _inputs_valid(self) -> bool:
         sbp = self._sbp_spin.value()
@@ -142,16 +147,15 @@ class CalibrationDialog(QDialog):
         """Enable confirm buttons only when both measurements exist AND inputs valid."""
         if not hasattr(self, '_btn_save'):
             return
-        enabled = self._has_valid_measurements() and self._inputs_valid()
+        enabled = self._inputs_valid()
+
         self._btn_save.setEnabled(enabled)
         self._btn_temp.setEnabled(enabled)
-        # Show/hide validation error
+
+        # 显示/隐藏验证错误提示
         if not self._inputs_valid():
             self._validation_error.setText(tr("msg_sbp_gt_dbp"))
             self._validation_error.setVisible(True)
-        elif not self._has_valid_measurements():
-            self._validation_error.setText("")
-            self._validation_error.setVisible(False)
         else:
             self._validation_error.setVisible(False)
 
@@ -255,9 +259,10 @@ class CalibrationDialog(QDialog):
         # -- confirm button row --
         btn_row = QHBoxLayout()
         btn_row.addStretch()
-        self._btn_save = QPushButton(tr("btn_save_record"))
+        self._btn_save = QPushButton("确认并开始基线采样")
         self._btn_save.clicked.connect(lambda: self._on_confirm(save=True))
         btn_row.addWidget(self._btn_save)
+
         self._btn_temp = QPushButton(tr("btn_calib_only"))
         self._btn_temp.clicked.connect(lambda: self._on_confirm(save=False))
         btn_row.addWidget(self._btn_temp)

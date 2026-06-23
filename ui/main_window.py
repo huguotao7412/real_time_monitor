@@ -213,6 +213,12 @@ class MainWindow(QMainWindow):
         self._ui_timer.timeout.connect(self._on_ui_tick)
         self._ui_timer.start(UI_REFRESH_MS)
 
+        # 10-second countdown calibration timer (100ms tick)
+        self._calib_timer = QTimer()
+        self._calib_timer.timeout.connect(self._on_calib_tick)
+        self._calib_duration = 10.0
+        self._calib_elapsed = 0.0
+
     def _update_tab_visibility(self) -> None:
         show_subject, show_bp, show_research = self._current_mode.tab_visibility()
         self._tabs.setTabVisible(0, show_subject)
@@ -582,81 +588,105 @@ class MainWindow(QMainWindow):
     # ── Calibration Slots ──────────────────────────────────────────
 
     def _show_calibration_dialog(self) -> None:
-        """Open the calibration dialog with current 5-second averages."""
-        measured_sbp, measured_dbp = None, None
-        if isinstance(self._current_mode, BPMode):
-            mode: BPMode = self._current_mode
-            measured_sbp, measured_dbp = mode.get_recent_bp_avg(5.0)
-            # Fallback: use latest single result if 5s window is empty
-            if measured_sbp is None and mode._latest_bp_result is not None:
-                r = mode._latest_bp_result
-                import numpy as np
-                if not np.isnan(r.sbp) and not np.isnan(r.dbp):
-                    measured_sbp = r.sbp
-                    measured_dbp = r.dbp
-
-        dlg = CalibrationDialog(measured_sbp, measured_dbp, self)
+        """Open the calibration dialog — user enters true BP values first."""
+        dlg = CalibrationDialog(measured_sbp=None, measured_dbp=None, parent=self)
         dlg.calibration_submitted.connect(self._on_calibration_confirmed)
         dlg.exec()
 
     def _on_calibration_confirmed(
         self, true_sbp: float, true_dbp: float, save: bool,
     ) -> None:
-        """Process a calibration submission from CalibrationDialog."""
-        import numpy as np
-        # 1. Get 5-second average measured values
-        measured_sbp: float | None = None
-        measured_dbp: float | None = None
-        if isinstance(self._current_mode, BPMode):
-            mode: BPMode = self._current_mode
-            measured_sbp, measured_dbp = mode.get_recent_bp_avg(5.0)
-            # Fallback: use latest single result
-            if measured_sbp is None and mode._latest_bp_result is not None:
-                r = mode._latest_bp_result
-                if not np.isnan(r.sbp) and not np.isnan(r.dbp):
-                    measured_sbp = r.sbp
-                    measured_dbp = r.dbp
-
-        # 2. If no measurements available, abort with feedback
-        if measured_sbp is None or measured_dbp is None:
-            self._status_label.setText("无有效BP数据，请先启动监测")
+        """Receive true BP values from dialog, start 10-second radar baseline sampling."""
+        # 1. Verify radar is running in BP mode
+        if not self._running or not isinstance(self._current_mode, BPMode):
+            self._status_label.setText("请先启动血压监测，再进行校准采样")
             self._status_label.setStyleSheet("color: #e74c3c;")
             return
 
-        # 2.5 Auto-create default profile if saving without one
-        if save and self._calib_mgr.active_profile_name is None:
+        # 2. Store user's target true values
+        self._calib_target_sbp = true_sbp
+        self._calib_target_dbp = true_dbp
+        self._calib_save_flag = save
+
+        # 3. Show overlay with ring progress animation
+        self._bp_tab.overlay.set_opacity(1.0)
+        self._bp_tab.overlay.setVisible(True)
+        self._bp_tab.overlay.set_progress(0.0)
+
+        # 4. Start high-frequency timer for animation (every 100ms)
+        self._calib_elapsed = 0.0
+        self._calib_timer.start(100)
+
+        # 5. Update status bar
+        self._status_label.setText("基线采样中，请保持平稳呼吸...")
+        self._status_label.setStyleSheet("color: #f39c12;")
+
+    def _on_calib_tick(self) -> None:
+        """Calibration countdown tick (every 100ms)."""
+        self._calib_elapsed += 0.1
+        fraction = self._calib_elapsed / self._calib_duration
+
+        if fraction < 1.0:
+            # Update ring progress and countdown number
+            self._bp_tab.overlay.set_progress(fraction)
+        else:
+            # 10 seconds reached — stop timer, hide overlay, settle
+            self._calib_timer.stop()
+            self._bp_tab.overlay.set_progress(1.0)
+            self._bp_tab.overlay.fade_out()
+            self._finish_calibration()
+
+    def _finish_calibration(self) -> None:
+        """10-second sampling complete: compute radar average, settle offsets, persist."""
+        import numpy as np
+        mode: BPMode = self._current_mode
+
+        # 1. Retrieve average radar-measured SBP/DBP over the last 10 seconds
+        measured_sbp, measured_dbp = mode.get_recent_bp_avg(self._calib_duration)
+
+        # 2. Guard: no valid radar lock during the 10-second window
+        if measured_sbp is None or measured_dbp is None:
+            self._status_label.setText("采样失败：雷达信号丢失，请保持静坐并重试")
+            self._status_label.setStyleSheet("color: #e74c3c;")
+            return
+
+        # 3. Auto-create default profile if user chose to save but no profile selected
+        if self._calib_save_flag and self._calib_mgr.active_profile_name is None:
             self._calib_mgr.add_profile("默认用户")
 
-        # 3. Compute new offsets (accumulative formula)
-        new_sbp_offset = self._calib_sbp + (true_sbp - measured_sbp)
-        new_dbp_offset = self._calib_dbp + (true_dbp - measured_dbp)
+        # 4. Compute new offsets
+        new_sbp_offset = self._calib_sbp + (self._calib_target_sbp - measured_sbp)
+        new_dbp_offset = self._calib_dbp + (self._calib_target_dbp - measured_dbp)
 
-        # 4. Persist if requested
-        if save:
+        # 5. Persist if requested
+        if self._calib_save_flag:
             active = self._calib_mgr.active_profile_name
             if active is not None:
                 self._calib_mgr.add_record(
-                    active, true_sbp, true_dbp,
-                    measured_sbp, measured_dbp,
+                    user_name=active,
+                    true_sbp=self._calib_target_sbp,
+                    true_dbp=self._calib_target_dbp,
+                    measured_sbp=measured_sbp,
+                    measured_dbp=measured_dbp,
                 )
+                # Reload precise offsets from JSON
                 new_sbp_offset = self._calib_mgr.current_sbp_offset
                 new_dbp_offset = self._calib_mgr.current_dbp_offset
 
-        # 5. Store in memory
+        # 6. Store in memory and inject into running pipeline
         self._calib_sbp = new_sbp_offset
         self._calib_dbp = new_dbp_offset
 
-        # 6. Inject into running pipeline
-        if isinstance(self._current_mode, BPMode):
-            mode: BPMode = self._current_mode
-            if mode._pipeline is not None:
-                mode._pipeline.set_calibration(new_sbp_offset, new_dbp_offset)
+        if mode._pipeline is not None:
+            mode._pipeline.set_calibration(new_sbp_offset, new_dbp_offset)
 
-        # 7. Status feedback via status bar (temporary)
-        if save:
-            self._status_label.setText(tr("msg_calib_success"))
+        # 7. Status feedback
+        if self._calib_save_flag:
+            self._status_label.setText(
+                f"校准成功: 雷达实测均值 {measured_sbp:.0f}/{measured_dbp:.0f}"
+            )
         else:
-            self._status_label.setText(tr("msg_calib_temp"))
+            self._status_label.setText("临时基线校准已应用")
         self._status_label.setStyleSheet("color: #27ae60;")
 
     def _on_profile_selected(self, name: str) -> None:
