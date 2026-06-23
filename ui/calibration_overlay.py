@@ -1,10 +1,18 @@
-"""Ring progress overlay shown during 10-second calibration phase."""
+"""Ring progress overlay shown during 10-second calibration phase,
+and CalibrationDialog for user-driven BP baseline calibration."""
 
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel
-from PyQt6.QtCore import Qt, QRectF, QPropertyAnimation, QEasingCurve, pyqtProperty
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QPushButton, QSpinBox, QDialog, QFrame,
+    QGroupBox, QGridLayout, QScrollArea,
+)
+from PyQt6.QtCore import (
+    Qt, QRectF, QPropertyAnimation, QEasingCurve, pyqtProperty, pyqtSignal,
+)
 from PyQt6.QtGui import QPainter, QPen, QColor, QFont
 
 from config.i18n import tr, I18n
+from config.calibration_mgr import CalibrationMgr
 
 
 class CalibrationOverlay(QWidget):
@@ -87,3 +95,260 @@ class CalibrationOverlay(QWidget):
                         90 * 16, -int(360 * self._progress) * 16)
 
         painter.end()
+
+
+class CalibrationDialog(QDialog):
+    """Modal dialog for BP baseline calibration with user profile management.
+
+    Users enter reference SBP/DBP from a sphygmomanometer. The dialog
+    displays the current 5-second average reading, manages calibration
+    history records, and emits calibration_submitted on confirm.
+    """
+
+    calibration_submitted = pyqtSignal(float, float, bool)
+    # true_sbp, true_dbp, save_to_profile
+
+    def __init__(
+        self,
+        measured_sbp: float | None,
+        measured_dbp: float | None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._measured_sbp = measured_sbp
+        self._measured_dbp = measured_dbp
+        self._calib_mgr = CalibrationMgr.instance()
+        self._setup_ui()
+        self._set_button_enabled_state()
+        self._refresh_history()
+        self.setWindowTitle(tr("dlg_calib_title"))
+        self.setMinimumWidth(480)
+        self.setModal(True)
+
+        # Listen for profile changes to refresh UI
+        self._calib_mgr.profile_changed.connect(self._on_profile_changed)
+
+    # ── internal state ──────────────────────────────────────────
+
+    def _has_valid_measurements(self) -> bool:
+        return self._measured_sbp is not None and self._measured_dbp is not None
+
+    def _inputs_valid(self) -> bool:
+        sbp = self._sbp_spin.value()
+        dbp = self._dbp_spin.value()
+        return (sbp - dbp) >= 15
+
+    def _set_button_enabled_state(self) -> None:
+        """Enable confirm buttons only when both measurements exist AND inputs valid."""
+        if not hasattr(self, '_btn_save'):
+            return
+        enabled = self._has_valid_measurements() and self._inputs_valid()
+        self._btn_save.setEnabled(enabled)
+        self._btn_temp.setEnabled(enabled)
+        # Show/hide validation error
+        if not self._inputs_valid():
+            self._validation_error.setText(tr("msg_sbp_gt_dbp"))
+            self._validation_error.setVisible(True)
+        elif not self._has_valid_measurements():
+            self._validation_error.setText("")
+            self._validation_error.setVisible(False)
+        else:
+            self._validation_error.setVisible(False)
+
+    # ── UI setup ────────────────────────────────────────────────
+
+    def _setup_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(20, 16, 20, 16)
+
+        # -- current user label --
+        self._user_label = QLabel()
+        self._user_label.setStyleSheet("color: #95a5a6; font-size: 10pt;")
+        layout.addWidget(self._user_label)
+        self._refresh_user_label()
+
+        # -- measured values display (read-only) --
+        measured_group = QGroupBox(tr("lbl_measured_bp"))
+        measured_grid = QGridLayout(measured_group)
+        self._meas_sbp_label = QLabel(
+            f"{self._measured_sbp:.0f}" if self._measured_sbp is not None else "--"
+        )
+        self._meas_sbp_label.setFont(QFont("Segoe UI", 20, QFont.Weight.Bold))
+        self._meas_sbp_label.setStyleSheet("color: #e74c3c;")
+        self._meas_dbp_label = QLabel(
+            f"{self._measured_dbp:.0f}" if self._measured_dbp is not None else "--"
+        )
+        self._meas_dbp_label.setFont(QFont("Segoe UI", 20, QFont.Weight.Bold))
+        self._meas_dbp_label.setStyleSheet("color: #3498db;")
+        measured_grid.addWidget(QLabel("SBP:"), 0, 0)
+        measured_grid.addWidget(self._meas_sbp_label, 0, 1)
+        measured_grid.addWidget(QLabel("mmHg"), 0, 2)
+        measured_grid.addWidget(QLabel("DBP:"), 1, 0)
+        measured_grid.addWidget(self._meas_dbp_label, 1, 1)
+        measured_grid.addWidget(QLabel("mmHg"), 1, 2)
+        layout.addWidget(measured_group)
+
+        # -- reference input group --
+        input_group = QGroupBox("参考血压 (水银血压计实测值)")
+        input_grid = QGridLayout(input_group)
+
+        input_grid.addWidget(QLabel(tr("lbl_true_sbp")), 0, 0)
+        self._sbp_spin = QSpinBox()
+        self._sbp_spin.setRange(90, 200)
+        self._sbp_spin.setValue(120)
+        self._sbp_spin.setSuffix(" mmHg")
+        self._sbp_spin.valueChanged.connect(self._set_button_enabled_state)
+        input_grid.addWidget(self._sbp_spin, 0, 1)
+
+        input_grid.addWidget(QLabel(tr("lbl_true_dbp")), 1, 0)
+        self._dbp_spin = QSpinBox()
+        self._dbp_spin.setRange(50, 130)
+        self._dbp_spin.setValue(80)
+        self._dbp_spin.setSuffix(" mmHg")
+        self._dbp_spin.valueChanged.connect(self._set_button_enabled_state)
+        input_grid.addWidget(self._dbp_spin, 1, 1)
+
+        layout.addWidget(input_group)
+
+        # -- validation error label --
+        self._validation_error = QLabel()
+        self._validation_error.setStyleSheet("color: #e74c3c; font-weight: bold;")
+        self._validation_error.setVisible(False)
+        layout.addWidget(self._validation_error)
+
+        # -- history section (collapsible) --
+        self._history_group = QGroupBox(tr("lbl_history"))
+        self._history_group.setCheckable(True)
+        self._history_group.setChecked(False)
+        self._history_group.toggled.connect(self._refresh_history)
+        history_layout = QVBoxLayout(self._history_group)
+
+        self._history_scroll = QScrollArea()
+        self._history_scroll.setWidgetResizable(True)
+        self._history_scroll.setMaximumHeight(150)
+        self._history_widget = QWidget()
+        self._history_layout = QVBoxLayout(self._history_widget)
+        self._history_layout.setContentsMargins(0, 0, 0, 0)
+        self._history_layout.addStretch()
+        self._history_scroll.setWidget(self._history_widget)
+        history_layout.addWidget(self._history_scroll)
+
+        history_btn_row = QHBoxLayout()
+        self._btn_delete_record = QPushButton(tr("btn_delete_record"))
+        self._btn_delete_record.clicked.connect(self._on_delete_selected)
+        history_btn_row.addWidget(self._btn_delete_record)
+        history_btn_row.addStretch()
+        self._btn_apply_record = QPushButton(tr("btn_apply_record"))
+        self._btn_apply_record.clicked.connect(self._on_apply_selected)
+        history_btn_row.addWidget(self._btn_apply_record)
+        history_layout.addLayout(history_btn_row)
+
+        layout.addWidget(self._history_group)
+
+        # -- separator --
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("background-color: #3a3a4a;")
+        layout.addWidget(sep)
+
+        # -- confirm button row --
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        self._btn_save = QPushButton(tr("btn_save_record"))
+        self._btn_save.clicked.connect(lambda: self._on_confirm(save=True))
+        btn_row.addWidget(self._btn_save)
+        self._btn_temp = QPushButton(tr("btn_calib_only"))
+        self._btn_temp.clicked.connect(lambda: self._on_confirm(save=False))
+        btn_row.addWidget(self._btn_temp)
+        layout.addLayout(btn_row)
+
+    # ── slots ───────────────────────────────────────────────────
+
+    def _on_confirm(self, save: bool) -> None:
+        sbp = float(self._sbp_spin.value())
+        dbp = float(self._dbp_spin.value())
+        self.calibration_submitted.emit(sbp, dbp, save)
+        self.accept()
+
+    def _on_delete_selected(self) -> None:
+        """Delete the currently active history record."""
+        active = self._calib_mgr.active_profile_name
+        if active is not None:
+            idx = self._calib_mgr.active_record_index
+            if idx is not None:
+                self._calib_mgr.delete_record(active, idx)
+
+    def _on_apply_selected(self) -> None:
+        """Apply the selected history record as active."""
+        active = self._calib_mgr.active_profile_name
+        if active is not None:
+            idx = self._calib_mgr.active_record_index
+            if idx is not None:
+                # Already active — no-op
+                pass
+
+    def _on_profile_changed(self) -> None:
+        self._refresh_user_label()
+        self._refresh_history()
+
+    # ── UI refresh helpers ──────────────────────────────────────
+
+    def _refresh_user_label(self) -> None:
+        active = self._calib_mgr.active_profile_name
+        if active:
+            self._user_label.setText(f"{tr('lbl_current_user')}：{active}")
+        else:
+            self._user_label.setText(f"{tr('lbl_current_user')}：--")
+
+    def _refresh_history(self) -> None:
+        """Rebuild history list for the active profile."""
+        # Clear old items (keep stretch)
+        while self._history_layout.count() > 0:
+            item = self._history_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        active = self._calib_mgr.active_profile_name
+        if active is None:
+            self._history_layout.addWidget(QLabel(tr("lbl_no_records")))
+            self._history_layout.addStretch()
+            return
+
+        profile = self._calib_mgr._find_profile(active)
+        records = profile["records"] if profile else []
+        if not records:
+            self._history_layout.addWidget(QLabel(tr("lbl_no_records")))
+            self._history_layout.addStretch()
+            return
+
+        active_idx = self._calib_mgr.active_record_index
+        for i, r in enumerate(records):
+            row = QHBoxLayout()
+            marker = "●" if i == active_idx else " "
+            text = (
+                f"{marker} {r['timestamp']}  "
+                f"参考: {r['true_sbp']}/{r['true_dbp']}  "
+                f"测量: {r['measured_sbp']}/{r['measured_dbp']}"
+            )
+            label = QLabel(text)
+            label.setStyleSheet("color: #bdc3c7; font-size: 9pt;")
+            row.addWidget(label)
+            row.addStretch()
+            self._history_layout.addLayout(row)
+
+        self._history_layout.addStretch()
+
+    # ── public helpers ──────────────────────────────────────────
+
+    def update_measured_values(self, sbp: float | None, dbp: float | None) -> None:
+        """Update the displayed measured values (called when readings change)."""
+        self._measured_sbp = sbp
+        self._measured_dbp = dbp
+        self._meas_sbp_label.setText(
+            f"{sbp:.0f}" if sbp is not None else "--"
+        )
+        self._meas_dbp_label.setText(
+            f"{dbp:.0f}" if dbp is not None else "--"
+        )
+        self._set_button_enabled_state()
