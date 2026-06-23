@@ -30,7 +30,7 @@ def clean_pulse_wave(raw_phase: np.ndarray, fs: float = 200.0) -> np.ndarray:
 
     # Step 2: Wavelet denoising (0.5× matches MATLAB)
     clean = _wavelet_denoise(signal_notch, fs)
-    return 0.5 * clean
+    return  clean
 
 
 def _remove_harmonics(signal: np.ndarray, fs: float) -> np.ndarray:

@@ -8,7 +8,8 @@ from scipy.signal import find_peaks
 
 
 def extract_bp(
-    waveform_mmhg: np.ndarray, fs: float = 50.0
+    waveform_mmhg: np.ndarray, fs: float = 50.0,
+user_calib_sbp: float = 0.0, user_calib_dbp: float = 0.0
 ) -> tuple[float, float, dict]:
     """Extract SBP and DBP via peak-valley detection.
 
@@ -54,11 +55,25 @@ def extract_bp(
         print(f"[extract_bp] FAIL: need >=3 peaks and >=3 valleys")
         return np.nan, np.nan, info
 
-        # 提取所有收缩期峰值的中位数
-    sbp = float(np.median(wf[peaks]))
+        # 按照 MATLAB 逻辑：去除两端极端值，取最高/最低
+    sorted_peaks = np.sort(wf[peaks])
+    sorted_valleys = np.sort(wf[valleys])
 
-        # 提取所有舒张期谷值的中位数
-    dbp = float(np.median(wf[valleys]))
+        # 确保有足够数据去头掐尾
+    if len(sorted_peaks) >= 3:
+            raw_sbp = float(np.max(sorted_peaks[1:-1]))
+    else:
+            raw_sbp = float(np.max(sorted_peaks))
+
+    if len(sorted_valleys) >= 3:
+            raw_dbp = float(np.min(sorted_valleys[1:-1]))
+    else:
+            raw_dbp = float(np.min(sorted_valleys))
+
+        # 应用 MATLAB 的经验补偿，并加入个人校准偏移量
+        # 建议在 UI 层面设计一个输入框，让用户输入水银血压计的真实值来动态计算 calib 值
+    sbp = raw_sbp - 10.0 + user_calib_sbp
+    dbp = raw_dbp - 20.0 + user_calib_dbp
 
     info["confidence"] = min(1.0, min(len(peaks), len(valleys)) / 10.0)
 
