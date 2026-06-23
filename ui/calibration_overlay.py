@@ -49,6 +49,9 @@ class CalibrationOverlay(QWidget):
     def update_ui_texts(self, _lang: str = "") -> None:
         self._text.setText(tr("calibration_text"))
 
+    def set_text(self, text: str) -> None:
+        self._text.setText(text)
+
     def set_progress(self, fraction: float) -> None:
         """Update ring progress 0.0-1.0 and derived countdown."""
         self._progress = fraction

@@ -113,11 +113,12 @@ class CalibrationMgr(QObject):
     def select_profile(self, user_name: str | None) -> None:
         """Switch active profile. Pass None to deactivate all profiles."""
         self._data["active_profile"] = user_name
-        # Auto-select first record if available
+        # 自动选择最新的记录
         if user_name is not None:
             profile = self._find_profile(user_name)
             if profile and profile["records"]:
-                self._data["active_record_index"] = 0
+                # [修改点] 将 0 改为 len(...) - 1，确保默认应用最新一次的血管基线校准
+                self._data["active_record_index"] = len(profile["records"]) - 1
             else:
                 self._data["active_record_index"] = None
         else:

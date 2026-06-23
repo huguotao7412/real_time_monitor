@@ -372,6 +372,12 @@ class MainWindow(QMainWindow):
             self._mode_btn.setEnabled(True)  # 若没在运行，马上恢复按钮
 
     def _on_stop(self) -> None:
+        self._pending_calib_start = False
+        if hasattr(self, '_calib_timer') and self._calib_timer.isActive():
+            self._calib_timer.stop()
+        if hasattr(self._bp_tab, 'overlay') and self._bp_tab.overlay.isVisible():
+            self._bp_tab.overlay.fade_out()
+
         if self._radar_mgr:
             self._radar_mgr.shutdown()
 
@@ -548,6 +554,21 @@ class MainWindow(QMainWindow):
     # === UI Timer ===
 
     def _on_ui_tick(self) -> None:
+        if getattr(self, '_pending_calib_start', False):
+            # 异常打断：如果雷达启动报错，中止校准
+            if getattr(self, '_serial_error', False):
+                self._pending_calib_start = False
+                self._bp_tab.overlay.fade_out()
+
+            # 等待成功：雷达正在运行，且拿到了有效的（非 NaN）第一帧数据
+            elif self._running and isinstance(self._current_mode, BPMode):
+                mode: BPMode = self._current_mode
+                if mode._latest_bp_result is not None:
+                    import numpy as np
+                    if not np.isnan(mode._latest_bp_result.sbp):
+                        # 成功锁定！立刻关闭等待标记，进入 10 秒倒计时
+                        self._pending_calib_start = False
+                        self._start_calibration_phase()
         # Poll serial status
         if self._serial_status:
             s = self._serial_status
@@ -596,29 +617,37 @@ class MainWindow(QMainWindow):
     def _on_calibration_confirmed(
         self, true_sbp: float, true_dbp: float, save: bool,
     ) -> None:
-        """Receive true BP values from dialog, start 10-second radar baseline sampling."""
-        # 1. Verify radar is running in BP mode
-        if not self._running or not isinstance(self._current_mode, BPMode):
-            self._status_label.setText("请先启动血压监测，再进行校准采样")
-            self._status_label.setStyleSheet("color: #e74c3c;")
-            return
-
-        # 2. Store user's target true values
+        """接收弹窗发来的真实值，进入自动化校准流水线"""
+        # 1. 暂存用户的目标真实值
         self._calib_target_sbp = true_sbp
         self._calib_target_dbp = true_dbp
         self._calib_save_flag = save
 
-        # 3. Show overlay with ring progress animation
+        # 2. 如果当前不在血压模式，自动切过去
+        if not isinstance(self._current_mode, BPMode):
+            self._on_toggle_mode()
+
+        # 3. 开启全屏遮罩层，提前安抚用户
+        self._bp_tab.overlay.set_progress(0.0)
         self._bp_tab.overlay.set_opacity(1.0)
         self._bp_tab.overlay.setVisible(True)
-        self._bp_tab.overlay.set_progress(0.0)
 
-        # 4. Start high-frequency timer for animation (every 100ms)
+        # 4. 判断雷达状态，进入等待队列
+        self._pending_calib_start = True  # 开启自动等待锁定状态机
+
+        if not self._running:
+            self._bp_tab.overlay.set_text("正在启动雷达并搜索目标...\n(请正对雷达保持静坐)")
+            self._start_serial() # 自动帮你点“启动”按钮
+        else:
+            self._bp_tab.overlay.set_text("正在等待雷达数据稳定...\n(请正对雷达保持静坐)")
+
+    def _start_calibration_phase(self) -> None:
+        """雷达已锁定且有数据，正式开始 10 秒倒计时采样"""
+        self._bp_tab.overlay.set_text("基线采样中，请保持平稳呼吸...")
         self._calib_elapsed = 0.0
-        self._calib_timer.start(100)
+        self._calib_timer.start(100)  # 启动 10 秒计时器
 
-        # 5. Update status bar
-        self._status_label.setText("基线采样中，请保持平稳呼吸...")
+        self._status_label.setText("基线采样中...")
         self._status_label.setStyleSheet("color: #f39c12;")
 
     def _on_calib_tick(self) -> None:
