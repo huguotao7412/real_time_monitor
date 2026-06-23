@@ -587,6 +587,13 @@ class MainWindow(QMainWindow):
         if isinstance(self._current_mode, BPMode):
             mode: BPMode = self._current_mode
             measured_sbp, measured_dbp = mode.get_recent_bp_avg(5.0)
+            # Fallback: use latest single result if 5s window is empty
+            if measured_sbp is None and mode._latest_bp_result is not None:
+                r = mode._latest_bp_result
+                import numpy as np
+                if not np.isnan(r.sbp) and not np.isnan(r.dbp):
+                    measured_sbp = r.sbp
+                    measured_dbp = r.dbp
 
         dlg = CalibrationDialog(measured_sbp, measured_dbp, self)
         dlg.calibration_submitted.connect(self._on_calibration_confirmed)
@@ -596,16 +603,29 @@ class MainWindow(QMainWindow):
         self, true_sbp: float, true_dbp: float, save: bool,
     ) -> None:
         """Process a calibration submission from CalibrationDialog."""
+        import numpy as np
         # 1. Get 5-second average measured values
         measured_sbp: float | None = None
         measured_dbp: float | None = None
         if isinstance(self._current_mode, BPMode):
             mode: BPMode = self._current_mode
             measured_sbp, measured_dbp = mode.get_recent_bp_avg(5.0)
+            # Fallback: use latest single result
+            if measured_sbp is None and mode._latest_bp_result is not None:
+                r = mode._latest_bp_result
+                if not np.isnan(r.sbp) and not np.isnan(r.dbp):
+                    measured_sbp = r.sbp
+                    measured_dbp = r.dbp
 
-        # 2. If no measurements available, abort
+        # 2. If no measurements available, abort with feedback
         if measured_sbp is None or measured_dbp is None:
+            self._status_label.setText("无有效BP数据，请先启动监测")
+            self._status_label.setStyleSheet("color: #e74c3c;")
             return
+
+        # 2.5 Auto-create default profile if saving without one
+        if save and self._calib_mgr.active_profile_name is None:
+            self._calib_mgr.add_profile("默认用户")
 
         # 3. Compute new offsets (accumulative formula)
         new_sbp_offset = self._calib_sbp + (true_sbp - measured_sbp)
@@ -619,8 +639,6 @@ class MainWindow(QMainWindow):
                     active, true_sbp, true_dbp,
                     measured_sbp, measured_dbp,
                 )
-                # add_record sets active_record_index → updates offsets
-                # Re-read offsets from the manager
                 new_sbp_offset = self._calib_mgr.current_sbp_offset
                 new_dbp_offset = self._calib_mgr.current_dbp_offset
 
