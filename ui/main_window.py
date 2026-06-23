@@ -26,6 +26,8 @@ from io_engine.data_exporter import export_csv, export_hdf5, export_edf, export_
 from ui.subject_tab import SubjectTab
 from ui.research_tab import ResearchTab
 from ui.monitor_mode import MonitorMode, HRMode, BPMode
+from ui.calibration_overlay import CalibrationDialog
+from config.calibration_mgr import CalibrationMgr
 from dsp_pipeline.strategies import (
     VMDRLSCleaner, EMDHarmonicCleaner, PassthroughCleaner,
     WPDSeparator, SOSFilterSeparator, EMDPulseCleaner,
@@ -63,6 +65,12 @@ class MainWindow(QMainWindow):
             bins_per_frame=self._current_mode.uart_bins)
 
         self._setup_ui()
+
+        # Calibration manager (survives mode hot-switches)
+        self._calib_mgr = CalibrationMgr.instance()
+        self._calib_sbp = self._calib_mgr.current_sbp_offset
+        self._calib_dbp = self._calib_mgr.current_dbp_offset
+
         self._setup_timers()
         self._start_research_signal.connect(self._research_tab.start)
         self._export_success_signal.connect(self._on_save_success)
@@ -178,6 +186,12 @@ class MainWindow(QMainWindow):
 
         I18n.instance().language_changed.connect(self.update_ui_texts)
 
+        # ── Calibration signal wiring ──
+        self._bp_tab.calibrate_clicked.connect(self._show_calibration_dialog)
+        self._bp_tab.profile_changed.connect(self._on_profile_selected)
+        self._bp_tab.profile_add_requested.connect(self._on_profile_add)
+        self._calib_mgr.profile_changed.connect(self._on_calibration_offset_changed)
+
     def update_ui_texts(self, _lang: str = "") -> None:
         self.setWindowTitle(tr("window_title"))
         self._title_label.setText(tr("app_title"))
@@ -265,7 +279,13 @@ class MainWindow(QMainWindow):
         self._current_mode.boot_radar(self._radar_mgr)
         self._stop_event = threading.Event()
         self._uart_parser.reset()
-        self._current_mode.start()
+        if isinstance(self._current_mode, BPMode):
+            self._current_mode.start(
+                calib_sbp=self._calib_sbp,
+                calib_dbp=self._calib_dbp,
+            )
+        else:
+            self._current_mode.start()
         self._current_mode.clear_data()
         self._start_time = time.time()
         self._frame_count = 0
@@ -559,6 +579,96 @@ class MainWindow(QMainWindow):
                     tr("frame_rate", f"{self._frame_count / elapsed:.1f}"))
             m, s_div = divmod(int(elapsed), 60)
             self._elapsed_label.setText(tr("elapsed", f"{m:02d}:{s_div:02d}"))
+
+    # ── Calibration Slots ──────────────────────────────────────────
+
+    def _show_calibration_dialog(self) -> None:
+        """Open the calibration dialog with current 5-second averages."""
+        measured_sbp, measured_dbp = None, None
+        if isinstance(self._current_mode, BPMode):
+            mode: BPMode = self._current_mode
+            measured_sbp, measured_dbp = mode.get_recent_bp_avg(5.0)
+
+        dlg = CalibrationDialog(measured_sbp, measured_dbp, self)
+        dlg.calibration_submitted.connect(self._on_calibration_confirmed)
+        dlg.exec()
+
+    def _on_calibration_confirmed(
+        self, true_sbp: float, true_dbp: float, save: bool,
+    ) -> None:
+        """Process a calibration submission from CalibrationDialog."""
+        # 1. Get 5-second average measured values
+        measured_sbp: float | None = None
+        measured_dbp: float | None = None
+        if isinstance(self._current_mode, BPMode):
+            mode: BPMode = self._current_mode
+            measured_sbp, measured_dbp = mode.get_recent_bp_avg(5.0)
+
+        # 2. If no measurements available, abort
+        if measured_sbp is None or measured_dbp is None:
+            return
+
+        # 3. Compute new offsets (accumulative formula)
+        new_sbp_offset = self._calib_sbp + (true_sbp - measured_sbp)
+        new_dbp_offset = self._calib_dbp + (true_dbp - measured_dbp)
+
+        # 4. Persist if requested
+        if save:
+            active = self._calib_mgr.active_profile_name
+            if active is not None:
+                self._calib_mgr.add_record(
+                    active, true_sbp, true_dbp,
+                    measured_sbp, measured_dbp,
+                )
+                # add_record sets active_record_index → updates offsets
+                # Re-read offsets from the manager
+                new_sbp_offset = self._calib_mgr.current_sbp_offset
+                new_dbp_offset = self._calib_mgr.current_dbp_offset
+
+        # 5. Store in memory
+        self._calib_sbp = new_sbp_offset
+        self._calib_dbp = new_dbp_offset
+
+        # 6. Inject into running pipeline
+        if isinstance(self._current_mode, BPMode):
+            mode: BPMode = self._current_mode
+            if mode._pipeline is not None:
+                mode._pipeline.set_calibration(new_sbp_offset, new_dbp_offset)
+
+        # 7. Status feedback via status bar (temporary)
+        if save:
+            self._status_label.setText(tr("msg_calib_success"))
+        else:
+            self._status_label.setText(tr("msg_calib_temp"))
+        self._status_label.setStyleSheet("color: #27ae60;")
+
+    def _on_profile_selected(self, name: str) -> None:
+        """Handle profile selection from BPTab combo."""
+        if not name:
+            self._calib_mgr.select_profile(None)
+        else:
+            self._calib_mgr.select_profile(name)
+
+    def _on_profile_add(self) -> None:
+        """Handle 'New User...' from BPTab combo."""
+        name, ok = QInputDialog.getText(
+            self, tr("dlg_new_user_title"), tr("dlg_new_user_prompt"),
+        )
+        if ok and name.strip():
+            self._calib_mgr.add_profile(name.strip())
+
+    def _on_calibration_offset_changed(self) -> None:
+        """Re-read offsets from CalibrationMgr and apply to running pipeline."""
+        self._calib_sbp = self._calib_mgr.current_sbp_offset
+        self._calib_dbp = self._calib_mgr.current_dbp_offset
+
+        if isinstance(self._current_mode, BPMode):
+            mode: BPMode = self._current_mode
+            if mode._pipeline is not None:
+                mode._pipeline.set_calibration(self._calib_sbp, self._calib_dbp)
+
+        # Refresh BPTab profile combo
+        self._bp_tab._refresh_profile_combo()
 
     def closeEvent(self, event) -> None:
         self._on_stop()
