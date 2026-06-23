@@ -207,6 +207,10 @@ class BPPipeline:
         self._sbp_ema: float | None = None
         self._dbp_ema: float | None = None
 
+        # Calibration offsets (injected by MainWindow, survives pipeline rebuild)
+        self._user_calib_sbp: float = 0.0
+        self._user_calib_dbp: float = 0.0
+
     # ======================================================================
     # Public API  (unchanged)
     # ======================================================================
@@ -230,6 +234,15 @@ class BPPipeline:
         """Set or disable A/B comparison cleaner. None disables."""
         self._ab_cleaner = cleaner
         self._ab_enabled = (cleaner is not None)
+
+    def set_calibration(self, sbp_offset: float, dbp_offset: float) -> None:
+        """Set user calibration offsets for SBP/DBP extraction.
+
+        Called by MainWindow on pipeline creation (hot-switch recovery)
+        and on calibration confirm.
+        """
+        self._user_calib_sbp = sbp_offset
+        self._user_calib_dbp = dbp_offset
 
     def get_dsp_telemetry(self) -> dict:
         """Return current DSP engine telemetry for debug panel."""
@@ -668,7 +681,11 @@ class BPPipeline:
         bp_waveform = self._bp.predict(input_seq.astype(np.float32))
 
         # --- SBP / DBP extraction ---
-        sbp, dbp, info = extract_bp(bp_waveform, fs=self.FS_TARGET)
+        sbp, dbp, info = extract_bp(
+            bp_waveform, fs=self.FS_TARGET,
+            user_calib_sbp=self._user_calib_sbp,
+            user_calib_dbp=self._user_calib_dbp,
+        )
 
         # --- bad-signal handling (soft) ---
         if np.isnan(sbp):
