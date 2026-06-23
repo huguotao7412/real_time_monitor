@@ -64,13 +64,12 @@ class MainWindow(QMainWindow):
         self._uart_parser = UartParser(
             bins_per_frame=self._current_mode.uart_bins)
 
-        self._setup_ui()
-
         # Calibration manager (survives mode hot-switches)
         self._calib_mgr = CalibrationMgr.instance()
         self._calib_sbp = self._calib_mgr.current_sbp_offset
         self._calib_dbp = self._calib_mgr.current_dbp_offset
 
+        self._setup_ui()
         self._setup_timers()
         self._start_research_signal.connect(self._research_tab.start)
         self._export_success_signal.connect(self._on_save_success)
