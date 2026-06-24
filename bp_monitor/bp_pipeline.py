@@ -333,8 +333,8 @@ class BPPipeline:
             return
 
         # ---- Phase 2: sliding-window inference trigger ----
-        required = BP_COLD_START_FRAMES if cold_start else self.MAX_FRAMES
-        if n_valid < required:
+        #required = BP_COLD_START_FRAMES if cold_start else self.MAX_FRAMES
+        if n_valid < BP_COLD_START_FRAMES:
             return
 
         # Trigger every STEP_FRAMES new frames (~0.5 s at 200 Hz)
