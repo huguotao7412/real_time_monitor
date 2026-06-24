@@ -550,10 +550,12 @@ class BPMode(MonitorMode):
             "bp_results": list(self._bp_results),
         }
 
-    def get_recent_bp_avg(self, seconds: float = 5.0) -> tuple[float | None, float | None]:
-        """Return mean SBP/DBP from _bp_results within the last N seconds.
+    def get_recent_bp_stats(self, seconds: float = 5.0) -> tuple[
+        float | None, float | None, float | None, float | None]:
+        """Return mean and standard deviation for SBP/DBP from _bp_results within the last N seconds.
 
-        Returns (None, None) if no valid data in the window.
+        Returns (mean_sbp, mean_dbp, std_sbp, std_dbp).
+        Returns (None, None, None, None) if no valid data in the window.
         """
         now = time.time()
         cutoff = now - seconds
@@ -566,8 +568,13 @@ class BPMode(MonitorMode):
                 if not np.isnan(r.dbp):
                     dbp_vals.append(r.dbp)
         if not sbp_vals or not dbp_vals:
-            return None, None
-        return float(np.mean(sbp_vals)), float(np.mean(dbp_vals))
+            return None, None, None, None
+
+        # 计算并返回：收缩压均值、舒张压均值、收缩压标准差、舒张压标准差
+        return (
+            float(np.mean(sbp_vals)), float(np.mean(dbp_vals)),
+            float(np.std(sbp_vals)), float(np.std(dbp_vals))
+        )
 
     def clear_data(self) -> None:
         self._bp_results.clear()

@@ -671,13 +671,23 @@ class MainWindow(QMainWindow):
         mode: BPMode = self._current_mode
 
         # 1. Retrieve average radar-measured SBP/DBP over the last 10 seconds
-        measured_sbp, measured_dbp = mode.get_recent_bp_avg(self._calib_duration)
+        measured_sbp, measured_dbp, std_sbp, std_dbp = mode.get_recent_bp_stats(self._calib_duration)
 
         # 2. Guard: no valid radar lock during the 10-second window
         if measured_sbp is None or measured_dbp is None:
             self._status_label.setText("采样失败：雷达信号丢失，请保持静坐并重试")
             self._status_label.setStyleSheet("color: #e74c3c;")
             return
+
+        # 2.5 Guard (Quality Control): 检查采样期间血压波动是否过大
+        # 设定阈值：收缩压波动标准差 > 15 mmHg 或 舒张压波动标准差 > 10 mmHg 视为无效采样
+        if std_sbp is not None and std_dbp is not None:
+                if std_sbp > 15.0 or std_dbp > 10.0:
+                    print(
+                        f"[Calibration] Rejected due to high variance. SBP std: {std_sbp:.1f}, DBP std: {std_dbp:.1f}")
+                    self._status_label.setText("采样失败：期间体征波动过大，请保持静坐并重新校准")
+                    self._status_label.setStyleSheet("color: #e74c3c;")
+                    return
 
         # 3. Auto-create default profile if user chose to save but no profile selected
         if self._calib_save_flag and self._calib_mgr.active_profile_name is None:

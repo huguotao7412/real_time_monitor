@@ -6,6 +6,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QSpinBox, QDialog, QFrame,
     QGroupBox, QGridLayout, QScrollArea,
+    QListWidget, QListWidgetItem, QAbstractItemView,
 )
 from PyQt6.QtCore import (
     Qt, QRectF, QPropertyAnimation, QEasingCurve, pyqtProperty, pyqtSignal,
@@ -231,15 +232,15 @@ class CalibrationDialog(QDialog):
         self._history_group.toggled.connect(self._refresh_history)
         history_layout = QVBoxLayout(self._history_group)
 
-        self._history_scroll = QScrollArea()
-        self._history_scroll.setWidgetResizable(True)
-        self._history_scroll.setMaximumHeight(150)
-        self._history_widget = QWidget()
-        self._history_layout = QVBoxLayout(self._history_widget)
-        self._history_layout.setContentsMargins(0, 0, 0, 0)
-        self._history_layout.addStretch()
-        self._history_scroll.setWidget(self._history_widget)
-        history_layout.addWidget(self._history_scroll)
+        self._history_list = QListWidget()
+        self._history_list.setMaximumHeight(150)
+        self._history_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._history_list.setStyleSheet(
+            "QListWidget { background: #2b2b36; border: 1px solid #3a3a4a; "
+            "border-radius: 4px; padding: 4px; color: #bdc3c7; font-size: 9pt; }"
+            "QListWidget::item:selected { background: #34495e; border-radius: 3px; }"
+        )
+        history_layout.addWidget(self._history_list)
 
         history_btn_row = QHBoxLayout()
         self._btn_delete_record = QPushButton(tr("btn_delete_record"))
@@ -280,21 +281,32 @@ class CalibrationDialog(QDialog):
         self.accept()
 
     def _on_delete_selected(self) -> None:
-        """Delete the currently active history record."""
-        active = self._calib_mgr.active_profile_name
-        if active is not None:
-            idx = self._calib_mgr.active_record_index
-            if idx is not None:
+        """Delete the selected history record."""
+        selected_items = self._history_list.selectedItems()
+        if not selected_items:
+            return  # 没有选中任何行则不操作
+
+        item = selected_items[0]
+        idx = item.data(Qt.ItemDataRole.UserRole)
+
+        if idx is not None:
+            active = self._calib_mgr.active_profile_name
+            if active is not None:
                 self._calib_mgr.delete_record(active, idx)
 
     def _on_apply_selected(self) -> None:
         """Apply the selected history record as active."""
-        active = self._calib_mgr.active_profile_name
-        if active is not None:
-            idx = self._calib_mgr.active_record_index
-            if idx is not None:
-                # Already active — no-op
-                pass
+        selected_items = self._history_list.selectedItems()
+        if not selected_items:
+            return
+
+        item = selected_items[0]
+        idx = item.data(Qt.ItemDataRole.UserRole)
+
+        if idx is not None:
+            active = self._calib_mgr.active_profile_name
+            if active is not None:
+                self._calib_mgr.select_record(active, idx)
 
     def _on_profile_changed(self) -> None:
         self._refresh_user_label()
@@ -311,41 +323,47 @@ class CalibrationDialog(QDialog):
 
     def _refresh_history(self) -> None:
         """Rebuild history list for the active profile."""
-        # Clear old items (keep stretch)
-        while self._history_layout.count() > 0:
-            item = self._history_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+        if not hasattr(self, '_history_list'):
+            return
+
+        self._history_list.clear()
 
         active = self._calib_mgr.active_profile_name
         if active is None:
-            self._history_layout.addWidget(QLabel(tr("lbl_no_records")))
-            self._history_layout.addStretch()
+            item = QListWidgetItem(tr("lbl_no_records"))
+            item.setFlags(Qt.ItemFlag.NoItemFlags)
+            self._history_list.addItem(item)
             return
 
         profile = self._calib_mgr._find_profile(active)
         records = profile["records"] if profile else []
         if not records:
-            self._history_layout.addWidget(QLabel(tr("lbl_no_records")))
-            self._history_layout.addStretch()
+            item = QListWidgetItem(tr("lbl_no_records"))
+            item.setFlags(Qt.ItemFlag.NoItemFlags)
+            self._history_list.addItem(item)
             return
 
         active_idx = self._calib_mgr.active_record_index
         for i, r in enumerate(records):
-            row = QHBoxLayout()
-            marker = "●" if i == active_idx else " "
+            marker = "★ [生效中] " if i == active_idx else "    "
             text = (
-                f"{marker} {r['timestamp']}  "
+                f"{marker}{r['timestamp']}  "
                 f"参考: {r['true_sbp']}/{r['true_dbp']}  "
                 f"测量: {r['measured_sbp']}/{r['measured_dbp']}"
             )
-            label = QLabel(text)
-            label.setStyleSheet("color: #bdc3c7; font-size: 9pt;")
-            row.addWidget(label)
-            row.addStretch()
-            self._history_layout.addLayout(row)
+            item = QListWidgetItem(text)
 
-        self._history_layout.addStretch()
+            # [修复 Bug 1] 将这条记录的真实索引隐藏绑定到 item，实现精准操作
+            item.setData(Qt.ItemDataRole.UserRole, i)
+
+            # 视觉优化：高亮当前生效的校准记录
+            if i == active_idx:
+                item.setForeground(QColor("#f1c40f"))
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+
+            self._history_list.addItem(item)
 
     # ── public helpers ──────────────────────────────────────────
 
