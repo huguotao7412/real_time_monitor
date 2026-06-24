@@ -144,14 +144,21 @@ class CalibrationMgr(QObject):
         if profile is None:
             return
 
+        # 1. 获取当前系统正在使用的旧偏移量
+        old_offset_sbp, old_offset_dbp = self._compute_current_offset()
+
+        # 2. 核心修复：计算新偏移量时，把旧偏移量加回来，抵消掉 measured 中包含的旧 offset
+        new_offset_sbp = true_sbp - measured_sbp + old_offset_sbp
+        new_offset_dbp = true_dbp - measured_dbp + old_offset_dbp
+
         record = {
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "true_sbp": round(true_sbp, 1),
             "true_dbp": round(true_dbp, 1),
             "measured_sbp": round(measured_sbp, 1),
             "measured_dbp": round(measured_dbp, 1),
-            "offset_sbp": round(true_sbp - measured_sbp, 1),
-            "offset_dbp": round(true_dbp - measured_dbp, 1),
+            "offset_sbp": round(new_offset_sbp, 1),
+            "offset_dbp": round(new_offset_dbp, 1),
         }
         profile["records"].append(record)
         self._data["active_profile"] = user_name
