@@ -1,42 +1,29 @@
 # RS6240 Radar Vital Signs Real-Time Monitor
 
-**RS6240 mmWave radar-based real-time vital signs monitoring system.**
-An integrated research platform for heart rate / breath rate monitoring (HR mode) and blood pressure estimation (BP mode), featuring a Single Source of Truth (SSOT) configuration architecture for seamless experimental tuning.
-
-**基于 RS6240 毫米波雷达的实时生命体征监测系统。** 集成心率/呼吸监测（HR 模式）与血压估算（BP 模式）的研究型平台，采用“单一事实来源（SSOT）”配置架构，专为科研调参和算法迭代设计。
+**基于 RS6240 毫米波雷达 (FMCW) 的实时生命体征监测与生理特征提取系统。**
+这是一个高度集成的研究型平台，专注于心率/呼吸监测（HR 模式）、血压估算（BP 模式）以及脉搏波传导速度 (PWV) 的特征提取。系统采用“单一事实来源（SSOT）”配置架构，专为科研调参、算法迭代及高并发任务处理设计。
 
 ---
 
 ## Features / 功能特性
 
-| Feature | Description |
-|---------|-------------|
-| **HR Mode** | Breath rate + heart rate from chest displacement. 2T4R antenna, MUSIC beamforming + LCMV, EMD harmonic removal, real-time waveform display. |
-| **BP Mode** | SBP/DBP estimation from pulse waveform. 1T1R antenna, 200Hz high-frequency sampling, 2D-CFAR + EMD + wavelet denoising + neural network inference. |
-| **Mode Hot-Swap** | Switch HR ↔ BP while monitoring (serial mode) without restarting application. Hardware commands sync automatically. |
-| **Subject-Friendly UI** | Breathing petal animation, pulsing heart icon, calming dark theme. |
-| **Research View** | Dual waveforms with axes, trend panel, SQI indicator, collapsible debug output (Phase range, breath ratio). |
-| **Data Export** | CSV, HDF5, EDF export for post-hoc analysis. |
-| **i18n** | English / 中文 language switch in menu bar. |
-
-| 功能 | 说明 |
-|------|------|
-| **心率模式** | 胸腔位移提取呼吸率 + 心率。2T4R 天线，MUSIC 波束成形 + LCMV，EMD 谐波滤除，实时波形显示 |
-| **血压模式** | 脉搏波形估算 SBP/DBP。1T1R 天线，200Hz 高频采样，2D-CFAR + EMD + 小波去噪 + 神经网络推理 |
-| **模式热切换** | 监测中直接切换 HR ↔ BP（串口模式），无需重启程序，雷达底层指令自动重配 |
-| **受检者界面** | 呼吸花瓣动画、心跳图标、暗色主题，适合被监测者观看 |
-| **研究界面** | 双波形带坐标轴、趋势图、SQI 信号质量、可折叠调试面板（极差、能量占比） |
-| **数据导出** | 支持 CSV / HDF5 / EDF 格式导出 |
-| **国际化** | 菜单栏一键切换英文 / 中文 |
+| 功能模块 | 详细说明 |
+| :--- | :--- |
+| **心率监测模式 (HR)** | 利用胸腔位移提取呼吸率与心率。结合 2T4R 天线、MUSIC 波束成形、LCMV 及 EMD 谐波滤除算法，提供高精度的实时波形显示。 |
+| **血压估算模式 (BP)** | 基于脉搏波形特征提取估算收缩压 (SBP) 与舒张压 (DBP)。采用 1T1R 天线、200Hz 高频采样，结合 2D-CFAR、EMD、小波去噪与神经网络推理。 |
+| **UI 算法热切换** | 针对算法模式切换进行了深度调试优化，在监测运行过程中即可在 UI 上无缝热切换 HR ↔ BP 算法模式，底层雷达指令与 UI 状态自动同步。 |
+| **纯中文交互界面** | 遵循深度研究智能体设计规范，UI 语言已全局锁定为**中文**。包含呼吸花瓣动画、心跳图标等受检者友好型视觉元素，以及暗色主题。 |
+| **专业研究看板** | 双波形坐标轴呈现、BPM 趋势追踪图、SQI 信号质量评估及可折叠调试面板（包含相位极差、能量占比等高阶数据）。 |
+| **多格式数据导出** | 支持一键导出 CSV、HDF5、EDF 格式，无缝衔接 MATLAB/Python 离线后处理分析。 |
 
 ---
 
 ## System Requirements / 系统要求
 
-- **Python** 3.10+ (Tested on 3.12.x)
-- **OS** Windows 10/11 (primary), Linux/macOS (untested)
-- **Hardware** RS6240 mmWave radar module + dual USB-UART (Standard + Enhanced COM ports)
-- **MATLAB weights file** `bp_matlab/bp_weights.mat` (required for BP mode only)
+- **操作系统**: Windows 10/11 (主力测试环境)
+- **Python 版本**: **Python 3.12.10** *(注：已全面迁移至 3.12.x 以彻底解决依赖库安装的兼容性与稳定性问题)*
+- **硬件依赖**: RS6240 毫米波雷达模块 + 双路 USB-UART（包含 Standard 与 Enhanced COM 端口）
+- **模型权重**: 运行血压模式需预置 `bp_matlab/bp_weights.mat`
 
 ---
 
@@ -87,7 +74,7 @@ Requires RS6240 radar connected via dual USB-UART (Standard + Enhanced COM ports
 Start monitoring, then click the purple mode button to switch HR ↔ BP on the fly.
 
 需要 RS6240 雷达通过双路 USB-UART 连接（Standard + Enhanced COM 口）。
-开始监测后，点击紫色模式按钮可热切换心率 ↔ 血压模式。
+开始监测后，点击紫色模式按钮可热切换心率 ↔ 血压模式，系统将自动挂起 I/O 并重配雷达指令。。
 
 ---
 
@@ -128,7 +115,7 @@ Start monitoring, then click the purple mode button to switch HR ↔ BP on the f
 
 仅此标签页可见。红色 SBP / 蓝色 DBP 大数字 (mmHg)、滚动血压波形、5 点置信度指示器、目标距离显示、更新时间标签。
 
-**SRC/DBP 在 BP 模式下不可用**、研究 Tab 自动隐藏。**
+
 
 ### Mode Switching / 模式切换
 
@@ -181,68 +168,77 @@ python main.py -s                            # Serial live, starts in HR mode
 
 ```
 real_time_monitor/
-├── main.py                  # Entry point: CLI parsing, QApplication setup
-├── requirements.txt         # Python dependencies
+├── main.py                  # 程序入口：命令行参数解析，QApplication 启动配置与系统级编排
+├── bin_relay.py             # 原始串口数据流转存与重定向脚本 (数据收集工具)
+├── requirements.txt         # Python 运行环境依赖列表 (注：推荐 Python 3.12 运行环境)
 │
-├── config/                  # Configuration
-│   ├── protocol.py          # DSP params, queue sizes, baud rates
-│   └── i18n.py              # EN/ZH internationalization
+├── config/                  # 全局配置模块
+│   ├── protocol.py          # 核心协议与参数：包含 DSP 参数、队列大小、通信波特率设定等
+│   ├── calibration_mgr.py   # 传感器校准与数据标定管理器
+│   └── i18n.py              # 国际化配置 
 │
-├── models/                  # Data structures
-│   └── radar_frame.py       # RadarFrame, FrameHeader dataclasses
+├── models/                  # 系统数据结构定义
+│   └── radar_frame.py       # 雷达数据帧 (RadarFrame) 与帧头 (FrameHeader) 数据类定义
 │
-├── io_engine/               # I/O layer (hardware-independent)
-│   ├── serial_manager.py    # Dual COM port management
-│   ├── radar_mgr.py         # Radar boot/shutdown command sequences
-│   ├── uart_parser.py       # UART protocol: magic byte → parsed frames
-│   ├── bin_reader.py        # .bin file reader for replay
-│   ├── bin_logger.py        # .bin file writer (optional)
-│   ├── frame_sync.py        # Frame synchronization
-│   ├── tcp_client.py        # TCP data source (alternative to serial)
-│   ├── cube_reader.py       # Raw cube data reader
-│   └── data_exporter.py     # CSV / HDF5 / EDF export functions
+├── io_engine/               # 输入/输出引擎层 (与底层硬件高度解耦)
+│   ├── serial_manager.py    # 双串口高并发通信管理 (Standard 与 Enhanced 端口)
+│   ├── radar_mgr.py         # 雷达设备管理器：启动/停止指令序列控制及热切换底层重配
+│   ├── uart_parser.py       # 串口协议解析：魔术字 (Magic Byte) 匹配与完整数据帧提取
+│   ├── bin_reader.py        # 二进制数据回放读取器 (支持 .bin 离线格式)
+│   ├── bin_logger.py        # 二进制原始数据落盘记录器 (可选启用)
+│   ├── frame_sync.py        # 软硬件数据帧同步控制机制
+│   ├── tcp_client.py        # TCP 网络数据源客户端 (作为串口直连的替代方案)
+│   ├── cube_reader.py       # 原始雷达数据立方 (Radar Cube) 读取器
+│   └── data_exporter.py     # 实验数据导出工具：支持 CSV / HDF5 / EDF 格式输出
 │
-├── dsp_pipeline/            # HR mode DSP chain
-│   ├── pipeline.py          # Main Pipeline: CFAR → phase → filters → BPM
-│   ├── range_bin.py         # Range bin selection (target lock)
-│   ├── cfar_2d.py           # 1D + 2D CFAR target detection
-│   ├── phase.py             # Phase extraction + unwrap
-│   ├── filters.py           # SOS bandpass filter bank
-│   ├── fft_bpm.py           # FFT / STFT BPM estimation + Kalman smoothing
-│   ├── harmonic_mask.py     # Harmonic interference masking
-│   ├── emd_cleaner.py       # EMD harmonic removal
-│   ├── wpd_filter.py        # Wavelet packet decomposition
-│   ├── music_angle.py       # MUSIC AoA estimation
-│   ├── lcmv_beamformer.py   # LCMV beamforming
-│   └── vital_signs.py       # VitalSigns result dataclass
+├── dsp_pipeline/            # 核心数字信号处理流水线 (心率/呼吸 HR 模式)
+│   ├── pipeline.py          # 主干信号流水线：CFAR 检测 → 相位提取 → 滤波清洗 → BPM 估算
+│   ├── range_bin.py         # 距离门 (Range bin) 精确选择与人体目标锁定
+│   ├── cfar_2d.py           # 一维/二维 CFAR (恒虚警率) 目标检测算法
+│   ├── phase.py             # 毫米波相位信号提取与相位解卷绕 (Unwrap) 算法
+│   ├── filters.py           # 二阶截面 (SOS) 级联带通滤波器组
+│   ├── fft_bpm.py           # 基于 FFT/STFT 的频率估计与卡尔曼 (Kalman) 滤波平滑
+│   ├── harmonic_mask.py     # 呼吸心跳谐波干扰掩蔽与消除处理
+│   ├── emd_cleaner.py       # 基于 EMD (经验模态分解) 的非线性信号谐波滤除
+│   ├── vmd_rls_cleaner.py   # VMD (变分模态分解) 与 RLS 混合深度清洗算法
+│   ├── rls_anc.py           # RLS (递归最小二乘) 自适应噪声抵消 (ANC)
+│   ├── wpd_filter.py        # 小波包分解 (WPD) 高阶滤波
+│   ├── music_angle.py       # 基于 MUSIC 算法的到达角 (AoA) 与空间谱估计
+│   ├── lcmv_beamformer.py   # LCMV (线性约束最小方差) 空间波束成形算法
+│   ├── smoothers.py         # 各类时域/频域信号平滑算法策略
+│   ├── strategies.py        # 信号处理核心算法层策略工厂模式实现
+│   └── vital_signs.py       # 生命体征分析结果 (VitalSigns) 数据类定义
 │
-├── bp_monitor/              # BP mode DSP chain
-│   ├── bp_pipeline.py       # BPPipeline: accum 1024 frames → CFAR → phase → clean → NN → SBP/DBP
-│   ├── bp_models.py         # BPResult dataclass
-│   ├── bp_cfar.py           # 1D + 2D CFAR (BP-specific thresholds)
-│   ├── bp_signal_cleaner.py # EMD + wavelet denoising for pulse wave
-│   ├── bp_network.py        # PyTorch neural network inference
-│   ├── bp_postprocess.py    # Peak/valley detection → SBP/DBP
-│   └── verify_network.py    # Network verification script
+├── bp_monitor/              # 血压监测模式信号处理流水线 (BP 模式)
+│   ├── bp_pipeline.py       # 血压流水线中枢：累积1024帧 → CFAR → 相位 → 清洗 → NN推理 → SBP/DBP
+│   ├── bp_models.py         # 血压预测结果与模型输出状态数据类
+│   ├── bp_cfar.py           # 针对血压特征定制化阈值的 1D + 2D CFAR 检测
+│   ├── bp_signal_cleaner.py # 脉搏波信号深度清洗：集成 EMD 分解与小波去噪
+│   ├── bp_network.py        # PyTorch 深度神经网络正向推理模块
+│   ├── bp_postprocess.py    # 信号后处理：波峰/波谷精准检测与血压值映射换算
+│   └── verify_network.py    # 神经网络权重一致性校验与离线测试脚本
 │
-├── ui/                      # GUI layer (PyQt6)
-│   ├── main_window.py       # MainWindow: tab host, control bar, mode dispatch
-│   ├── monitor_mode.py      # MonitorMode ABC + HRMode + BPMode (Strategy pattern)
-│   ├── subject_tab.py       # Subject-facing tab: BPM, petals, heart icon, waveform
-│   ├── bp_tab.py            # BP tab: SBP/DBP numbers, BP waveform, confidence dots
-│   ├── research_tab.py      # Research tab: dual waveforms, trend, SQI, debug
-│   ├── wave_widget.py       # High-performance waveform renderer (pyqtgraph)
-│   ├── trend_panel.py       # BPM time-series trend plot
-│   ├── sqi_indicator.py     # 3-dot signal quality indicator
-│   ├── breathing_petals.py  # Breathing animation widget
-│   ├── calibration_overlay.py # Calibration progress overlay
-│   ├── status_mapper.py     # Status → UI state mapping + movement detection
-│   └── controls.py          # (Deprecated) Old-style control widget
+├── ui/                      # 图形用户交互界面层 (基于 PyQt6)
+│   ├── main_window.py       # 主窗口：承载标签页容器、控制栏、以及算法模式热切换分发中枢
+│   ├── monitor_mode.py      # 监测模式抽象基类 (采用策略模式分离 HR 与 BP 状态管理)
+│   ├── subject_tab.py       # 受检者视图界面：超大 BPM 显示、呼吸花瓣引导、心跳动效与基础波形
+│   ├── bp_tab.py            # 血压专用视图：展示 SBP/DBP 数值、滚动脉搏波与网络置信度指示灯
+│   ├── research_tab.py      # 科研调试视图：支持双轨波形坐标系、历史趋势、SQI 打分及调试控制面板
+│   ├── wave_widget.py       # 高性能波形实时渲染组件 (底层基于 pyqtgraph 优化)
+│   ├── trend_panel.py       # BPM 与生理指标时间序列历史趋势绘图面板
+│   ├── sqi_indicator.py     # 三级 SQI (信号质量指数) 可视化指示组件
+│   ├── breathing_petals.py  # 呼吸花瓣动态引导视觉组件
+│   ├── calibration_overlay.py # 系统启动及标定进度全屏遮罩层
+│   ├── status_mapper.py     # 状态映射器：将底层通信状态转化为 UI 呈现，并集成体动防抖预警
+│   └── controls.py          # (已弃用/Deprecated) 遗留的老版本控制台组件保留
 │
-├── bp_matlab/               # BP neural network weights
-│   └── bp_weights.mat       # MATLAB-exported PyTorch weights
+├── utils/                   # 核心通用工具与性能分析类库
+│   └── benchmark_logger.py  # 算法流水线性能基准测试与耗时统计监控工具
 │
-└── data/                    # .bin data files (gitignored)
+├── bp_matlab/               # 血压神经网络预训练模型目录
+│   └── bp_weights.mat       # 由 MATLAB 环境导出并适配 PyTorch 正向推理的权重文件
+│
+└── data/                    # 离线采集数据存储目录 (已加入 .gitignore 以防止误提交)
 ```
 
 ### Key Design Patterns / 关键设计模式
