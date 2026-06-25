@@ -183,6 +183,10 @@ class MainWindow(QMainWindow):
         # Apply initial tab visibility
         self._update_tab_visibility()
 
+        # Set initial research tab layout for current mode
+        from ui.monitor_mode import BPMode
+        self._research_tab.set_mode(isinstance(self._current_mode, BPMode))
+
         I18n.instance().language_changed.connect(self.update_ui_texts)
 
         # ── Calibration signal wiring ──
@@ -357,6 +361,10 @@ class MainWindow(QMainWindow):
             tr("btn_mode_hr") if isinstance(self._current_mode, BPMode)
             else tr("btn_mode_bp")
         )
+
+        # Sync research tab layout for current mode
+        is_bp = isinstance(self._current_mode, BPMode)
+        self._research_tab.set_mode(is_bp)
 
         # 5. Reset inactive tabs to "--"
         if was_bp:

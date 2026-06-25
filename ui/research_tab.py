@@ -72,6 +72,14 @@ class _QualityDashboard(QWidget):
             v.setStyleSheet(f"color:{cl};font-size:14pt;font-weight:bold")
             cl.addWidget(v); l.addWidget(c); self._m[k]=(v,cl)
         l.addStretch()
+    def set_mode(self, is_bp_mode: bool) -> None:
+        if is_bp_mode:
+            self._m["br"][1].itemAt(0).widget().setText("Net Conf")
+            self._m["hp"][1].itemAt(0).widget().setText("Peaks/HR")
+        else:
+            self._m["br"][1].itemAt(0).widget().setText("BreathSNR")
+            self._m["hp"][1].itemAt(0).widget().setText("HeartSNR")
+
     def update(self,pr=0.0,br=0.0,hp=0.0,td=0.0):
         vals={"pr":pr,"br":br*100,"hp":hp*10,"td":td}
         for k,v in vals.items():
@@ -86,10 +94,10 @@ class ResearchTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._sqi_level = 0
-        self._quality_dashboard = _QualityDashboard()
         self._pulse_wave = _PulseWaveWidget(fs=20.0)
         self._debug_expanded = False
         self._last_bpm_label_update: float = 0.0
+        self._bpm_widgets: list[QWidget] = []
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -152,9 +160,13 @@ class ResearchTab(QWidget):
         wave_splitter.addWidget(self._breath_wave)
         wave_splitter.addWidget(self._heart_wave)
         layout.addWidget(wave_splitter, stretch=3)
+        layout.addWidget(self._pulse_wave, stretch=3)
+        self._pulse_wave.setVisible(False)  # 默认 HR 模式隐藏
 
-        # BPM row + SQI
-        bpm_row = QHBoxLayout()
+        # BPM row + SQI (wrapped for mode-aware visibility toggle)
+        self._bpm_container = QWidget()
+        bpm_row = QHBoxLayout(self._bpm_container)
+        bpm_row.setContentsMargins(0, 0, 0, 0)
         bpm_font = QFont("Segoe UI", 22, QFont.Weight.Bold)
 
         self._breath_bpm_label = QLabel("--")
@@ -178,7 +190,7 @@ class ResearchTab(QWidget):
         bpm_row.addStretch()
         self._sqi = SqiIndicator()
         bpm_row.addWidget(self._sqi)
-        layout.addLayout(bpm_row)
+        layout.addWidget(self._bpm_container)
 
         # Trend panel
         self._trend = TrendPanel()
@@ -313,7 +325,7 @@ class ResearchTab(QWidget):
         self._heart_wave.set_data(np.array([], dtype=np.float32))
         self._pulse_wave.set_data(np.array([], dtype=np.float32))
         self._sqi.set_level(0.0, 0.0)
-        self._quality_dashboard.update(0,0,0,0)
+        self._qd.update(0,0,0,0)
         self._trend.start()
         self._debug_panel.clear()
 
@@ -353,7 +365,7 @@ class ResearchTab(QWidget):
 
         # Quality Dashboard
         heart_prom = quality.get("heart_prominence", 0.0) if quality else 0.0
-        self._quality_dashboard.update(
+        self._qd.update(
             pr=phase_range,
             br=breath_ratio,
             hp=heart_prom,
@@ -389,4 +401,54 @@ class ResearchTab(QWidget):
                     lines.append(
                         tr("debug_dsp_ab", ab_algo, f"{ab_lat:.0f}", ab_snr)
                     )
+            self._debug_panel.setText("  |  ".join(lines))
+
+    # ── BP mode support ──
+
+    def set_mode(self, is_bp_mode: bool) -> None:
+        """切换界面布局以适应不同的监测模式。"""
+        self._qd.set_mode(is_bp_mode)
+        if is_bp_mode:
+            # 隐藏双波形 splitter，显示单路脉搏波
+            self._breath_wave.parentWidget().setVisible(False)
+            self._pulse_wave.setVisible(True)
+            # 隐藏下方的呼吸/心率大字 BPM 区域及 SQI
+            self._bpm_container.setVisible(False)
+        else:
+            self._breath_wave.parentWidget().setVisible(True)
+            self._pulse_wave.setVisible(False)
+            self._bpm_container.setVisible(True)
+
+    def update_display_bp(self, bp_result) -> None:
+        """专门用于血压模式的数据更新。"""
+        r = bp_result
+        # 1. 更新脉搏波形
+        if len(r.bp_waveform) > 0:
+            self._pulse_wave.set_data(r.bp_waveform)
+
+        # 2. 提取质量指标
+        quality = r.quality or {}
+        phase_range = quality.get("phase_range", 0.0)
+        conf = quality.get("confidence", 0.0)
+        n_peaks = quality.get("n_peaks", 0)
+
+        # 将峰值数量转换为隐含心率展示 (与 BP_Tab 逻辑一致)
+        implicit_hr = (n_peaks / 5.12 * 60.0) if n_peaks > 0 else 0.0
+
+        # 3. 更新 Dashboard
+        self._qd.update(
+            pr=phase_range,
+            br=conf / 100.0,
+            hp=implicit_hr / 10.0,
+            td=r.target_distance_m,
+        )
+
+        # 4. 更新 Debug 面板
+        if self._debug_expanded:
+            lines = [
+                f"phase_range: {phase_range:.4f}",
+                f"confidence: {conf:.2f}",
+                f"n_peaks: {n_peaks}",
+                f"SBP: {r.sbp:.1f} | DBP: {r.dbp:.1f}",
+            ]
             self._debug_panel.setText("  |  ".join(lines))
