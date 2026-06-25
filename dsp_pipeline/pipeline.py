@@ -252,15 +252,19 @@ class Pipeline:
                         current_actual_snr < 5.0 or new_snr > current_actual_snr * CFAR_SNR_UPDATE_RATIO):
                     print(f"[DSP] Target moved! Range updated to bin: {new_bin} ...")
 
-                    # ========== 【核心修改：计算跨 Bin 瞬时相位差】 ==========
                     if self._best_bin is not None:
                         # 提取在切换这一帧时，旧 Bin 和新 Bin 的空间绝对相位
                         old_phase_inst = extract_phase(data_cube, self._best_bin)
                         new_phase_inst = extract_phase(data_cube, new_bin)
 
                         # 将这个阶跃差值累加到全局补偿量中
-                        self._cross_bin_phase_offset += (old_phase_inst - new_phase_inst)
-                    # ========================================================
+                        phase_diff = old_phase_inst - new_phase_inst
+                        self._cross_bin_phase_offset += phase_diff
+
+                        # 对多天线复数缓冲流进行等效的复数相位旋转，确保 LCMV 空间特征一致性
+                        phase_rotation = np.exp(1j * phase_diff)
+                        for i in range(len(self._rx_buffer)):
+                            self._rx_buffer[i] = self._rx_buffer[i] * phase_rotation
 
                     self._best_bin = new_bin
                     self._current_bin_snr = new_snr

@@ -325,9 +325,7 @@ class MainWindow(QMainWindow):
                     time.sleep(0.5)
         finally:
             # 循环结束（不论是正常停止还是异常退出），由 IO 线程自行安全关闭底层串口
-            if self._serial_mgr:
-                print("[Serial I/O] Thread exiting, safely closing serial ports...")
-                self._serial_mgr.close()
+            print("[Serial I/O] Thread exiting...")
 
     def _on_toggle_mode(self) -> None:
         """Hot-switch between HR and BP monitoring modes (serial only)."""
@@ -394,9 +392,10 @@ class MainWindow(QMainWindow):
         if self._stop_event:
             self._stop_event.set()  # 发出停止信号
 
+        if self._serial_mgr:
+            self._serial_mgr.close()
+
         if self._io_thread:
-            # timeout 应该稍微大于你 config 中设置的 DATA_TIMEOUT_SEC
-            # 假设 DATA_TIMEOUT_SEC 是 0.5，这里给 1.0 秒以保证线程能响应超时并退出
             self._io_thread.join(timeout=1.0)
 
         self._current_mode.stop()
