@@ -6,6 +6,7 @@ builds sin/cos basis for f_RR and its first 3 harmonics, then subtracts via leas
 
 import numpy as np
 from scipy.signal import welch
+from config.protocol import EMD_RESP_CORR_RATIO
 
 
 def emd_harmonic_clean(
@@ -78,7 +79,7 @@ def emd_harmonic_clean(
 
     valid_corrs = np.abs(imf_corrs[resp_candidates])
     max_corr = np.max(valid_corrs)
-    strong = resp_candidates[valid_corrs > max_corr * 0.7]
+    strong = resp_candidates[valid_corrs > max_corr * EMD_RESP_CORR_RATIO]
     if len(strong) == 0:
         return signal.copy()
     best_idx = strong[np.argmin(imf_freqs[strong])]

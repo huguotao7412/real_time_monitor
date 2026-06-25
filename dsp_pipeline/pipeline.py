@@ -20,7 +20,10 @@ from config.protocol import (
     CFAR_RESCAN_MIN_FRAMES, SAVGOL_WINDOW_LENGTH, SAVGOL_POLYORDER,
     ADAPTIVE_HIGH_PHASE_THRESHOLD, ADAPTIVE_LOW_PHASE_THRESHOLD,
     ADAPTIVE_HIGH_SNR_DB, ADAPTIVE_LOW_SNR_DB, ADAPTIVE_EVAL_INTERVAL,
-    WELCH_NPERSEG, HEART_KALMAN_HISTORY_MAXLEN
+    WELCH_NPERSEG, HEART_KALMAN_HISTORY_MAXLEN,
+    CFAR_NEW_TARGET_MIN_SNR, TARGET_EMPTY_SNR_THRESHOLD, PHASE_JUMP_MA_THRESHOLD,
+    HEART_BPM_JUMP_LIMIT, HEART_PROM_MIN_VALID, HAMPEL_WINDOW_SIZE, HAMPEL_SIGMA,
+    BPM_KALMAN_Q, BPM_KALMAN_R
 )
 from models.radar_frame import RadarFrame
 from dsp_pipeline.vital_signs import VitalSigns
@@ -247,8 +250,7 @@ class Pipeline:
         elif self._frame_count > 0 and self._frame_count % self._cfar_rescan_interval == 0:
             new_bin, new_snr, current_actual_snr = self._run_2d_cfar_rescan()
             if new_bin is not None:
-                MIN_NEW_TARGET_SNR = 12.0
-                if new_snr > MIN_NEW_TARGET_SNR and (
+                if new_snr > CFAR_NEW_TARGET_MIN_SNR and (
                         current_actual_snr < 5.0 or new_snr > current_actual_snr * CFAR_SNR_UPDATE_RATIO):
                     print(f"[DSP] Target moved! Range updated to bin: {new_bin} ...")
 
@@ -414,11 +416,10 @@ class Pipeline:
 
         # 物理限制：人类胸腔最大运动速度阈值判定。突变超出阈值视为体动干扰
         diff_phase = np.abs(np.diff(unwrapped))
-        MA_THRESHOLD = 0.8  # 可视实际波长调节（rad/frame），24GHz或77GHz表现不同
 
-        if np.any(diff_phase > MA_THRESHOLD):
+        if np.any(diff_phase > PHASE_JUMP_MA_THRESHOLD):
             # 引入快速 Hampel 滤波（局部中值异常点剔除）
-            window_size = 5
+            window_size = HAMPEL_WINDOW_SIZE
             pad_width = window_size // 2
             padded = np.pad(unwrapped, pad_width, mode='edge')
 
@@ -522,8 +523,7 @@ class Pipeline:
             recent_phase_range = phase_range
 
         # 弱信号检测 → Range Bin 重捕获
-        SNR_THRESHOLD_EMPTY = 10.0  # 根据实际雷达表现微调经验值
-        in_low_signal = (recent_phase_range < PHASE_RANGE_MIN_NORMAL) and (self._current_bin_snr < SNR_THRESHOLD_EMPTY)
+        in_low_signal = (recent_phase_range < PHASE_RANGE_MIN_NORMAL) and (self._current_bin_snr < TARGET_EMPTY_SNR_THRESHOLD)
 
         if in_low_signal:
             self._low_signal_frame_count += 1
@@ -587,7 +587,8 @@ class Pipeline:
                         heart_bpm_accepted = True
                         if self._last_valid_heart_bpm > 0:
                             bpm_jump = abs(heart_bpm_raw - self._last_valid_heart_bpm)
-                            if bpm_jump > 20.0 and adv_heart_prom < 0.3:
+                            prom_val = adv_heart_prom if 'adv_heart_prom' in locals() else prominence
+                            if bpm_jump > HEART_BPM_JUMP_LIMIT and prom_val < HEART_PROM_MIN_VALID:
                                 heart_bpm_accepted = False
 
                         if heart_bpm_accepted:
@@ -605,7 +606,7 @@ class Pipeline:
                                     self._heart_history = self._heart_history[-HEART_KALMAN_HISTORY_MAXLEN:]
                                 prom_slice = self._heart_prominence_history[-len(self._heart_history):]
                                 heart_bpm = kalman_smooth(
-                                    self._heart_history, q=1e-3, r=0.5,
+                                    self._heart_history, q=BPM_KALMAN_Q, r=BPM_KALMAN_R,
                                     prominences=prom_slice)
                                 self._last_valid_heart_bpm = heart_bpm
                         else:
@@ -684,7 +685,8 @@ class Pipeline:
                     heart_bpm_accepted = True
                     if self._last_valid_heart_bpm > 0:
                         bpm_jump = abs(heart_bpm_raw - self._last_valid_heart_bpm)
-                        if bpm_jump > 20.0 and prominence < 0.3:
+                        prom_val = adv_heart_prom if 'adv_heart_prom' in locals() else prominence
+                        if bpm_jump > HEART_BPM_JUMP_LIMIT and prom_val < HEART_PROM_MIN_VALID:
                             heart_bpm_accepted = False
 
                     if heart_bpm_accepted:
@@ -702,7 +704,7 @@ class Pipeline:
                                 self._heart_history = self._heart_history[-HEART_KALMAN_HISTORY_MAXLEN:]
                             prom_slice = self._heart_prominence_history[-len(self._heart_history):]
                             heart_bpm = kalman_smooth(
-                                self._heart_history, q=1e-3, r=0.5,
+                                self._heart_history,q=BPM_KALMAN_Q, r=BPM_KALMAN_R,
                                 prominences=prom_slice,
                             )
                             self._last_valid_heart_bpm = heart_bpm

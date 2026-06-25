@@ -42,6 +42,7 @@ from config.protocol import (
     BP_COLD_START_FRAMES,
     FREQ_SCALE_60G_TO_24G, PHASE_RANGE_MIN_BP, BP_MAX_BAD_SIGNAL_COUNT,
     MIN_REAL_DISTANCE_M,
+    RADAR_MAX_RANGE_BINS, BP_TRACKER_ALPHA, BP_TRACKER_BETA, BP_EMA_ALPHA
 )
 from models.radar_frame import RadarFrame
 from bp_monitor.bp_models import BPResult
@@ -169,7 +170,7 @@ class BPPipeline:
         # ==================================================================
         # Ring buffer  (Optimisation 3 — zero-copy / no physical shift)
         # ==================================================================
-        self._buffer = np.zeros((32, self.MAX_FRAMES, 1), dtype=complex)
+        self._buffer = np.zeros((RADAR_MAX_RANGE_BINS, self.MAX_FRAMES, 1), dtype=complex)
         self._head: int = 0
         self._frame_count: int = 0
 
@@ -190,7 +191,7 @@ class BPPipeline:
         # ==================================================================
         # Alpha-Beta tracker
         # ==================================================================
-        self._tracker = AlphaBetaTracker(alpha=0.85, beta=0.5)
+        self._tracker = AlphaBetaTracker(alpha=BP_TRACKER_ALPHA, beta=BP_TRACKER_BETA)
 
         # Phase-continuity reference
         self._last_phase_ref: tuple[int, float] | None = None
@@ -785,7 +786,7 @@ class BPPipeline:
             if self._sbp_ema is None:
                 self._sbp_ema = sbp_median
             else:
-                self._sbp_ema = 0.3 * sbp_median + 0.7 * self._sbp_ema
+                self._sbp_ema = BP_EMA_ALPHA * sbp_median + (1.0 - BP_EMA_ALPHA) * self._sbp_ema
             sbp_smooth = self._sbp_ema
 
         if len(self._dbp_history) > 0:
@@ -793,7 +794,7 @@ class BPPipeline:
             if self._dbp_ema is None:
                 self._dbp_ema = dbp_median
             else:
-                self._dbp_ema = 0.3 * dbp_median + 0.7 * self._dbp_ema
+                self._dbp_ema = BP_EMA_ALPHA * dbp_median + (1.0 - BP_EMA_ALPHA) * self._dbp_ema
             dbp_smooth = self._dbp_ema
 
         return sbp_smooth, dbp_smooth
