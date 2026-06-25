@@ -509,7 +509,6 @@ class BPMode(MonitorMode):
         if self._latest_bp_result is not None:
             r = self._latest_bp_result
 
-            # 【修复点】：只有在获取到新结果时，才更新图表和追加记录
             if new_result:
                 bp_tab.update_display(r)
                 self._bp_results.append(r)
@@ -525,16 +524,40 @@ class BPMode(MonitorMode):
                         "Confidence": round(r.quality.get("confidence", 0.0), 4) if r.quality else 0.0,
                     })
 
+            # 1. 映射信号质量指标，防止仪表盘显示 "--"
+            quality_mapped = {}
+            if r.quality:
+                quality_mapped.update(r.quality)
+                # 血压模式没有呼吸比，我们将其设为0
+                quality_mapped["breath_ratio"] = 0.0
+                # 借用心跳信噪比(HeartSNR)的槽位，来显示血压的置信度(confidence)
+                quality_mapped["heart_prominence"] = r.quality.get("confidence", 0.0)
+
+            bp_wave = r.bp_waveform if hasattr(r, 'bp_waveform') and r.bp_waveform is not None else np.array([])
+            display_wave = bp_wave
+
+            # bp_waveform 是 50Hz，ResearchTab 画布是 20Hz。
+            if len(bp_wave) > 0:
+                import scipy.signal
+                target_len = int(len(bp_wave) * 20 / 50)
+                if target_len > 0:
+                    display_wave = scipy.signal.resample(bp_wave, target_len)
+
+            # 3. 隐式心率计算 (利用波峰数估算心率，让面板上的心率数字也动起来)
+            n_peaks = r.quality.get("n_peaks", 0) if r.quality else 0
+            implicit_bpm = (n_peaks / 5.12) * 60.0 if n_peaks > 0 else 0.0
+
             # Research tab 和 telemetry 可以继续每帧刷新
             dsp_telemetry = self.get_dsp_telemetry()
             benchmark_elapsed = self.get_benchmark_elapsed()
+
             research_tab.update_display(
                 breath_bpm=0.0,
-                heart_bpm=0.0,
-                breath_waveform=np.array([]),
-                heart_waveform=np.array([]),
+                heart_bpm=implicit_bpm,
+                breath_waveform=np.array([]),  # 血压模式通常只提取脉搏波，如果没有呼吸波形就保留空
+                heart_waveform=bp_wave,  # 传入血压脉搏波形数据
                 quality=r.quality,
-                sample_for_trend=False,
+                sample_for_trend=new_result,  # 建议改为 new_result，仅在有新结果时记录趋势
                 dsp_telemetry=dsp_telemetry,
                 benchmark_elapsed=benchmark_elapsed,
                 target_distance_m=r.target_distance_m if hasattr(r, 'target_distance_m') else 0.0,

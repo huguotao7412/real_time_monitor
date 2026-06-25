@@ -687,6 +687,8 @@ class BPPipeline:
             user_calib_dbp=self._user_calib_dbp,
         )
 
+        info["phase_range"] = phase_range
+
         # --- bad-signal handling (soft) ---
         if np.isnan(sbp):
             self._bad_signal_count += 1
