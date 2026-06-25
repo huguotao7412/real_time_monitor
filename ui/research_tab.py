@@ -1,6 +1,8 @@
-"""Research mode tab — full DSP data, waveforms with axes, trend panel, debug."""
+"""Research mode tab — full DSP data, pulse waveform, quality dashboard, trend panel, debug."""
 
 import time
+from collections import deque
+from scipy.signal import find_peaks
 
 import numpy as np
 from PyQt6.QtWidgets import (
@@ -12,8 +14,70 @@ from PyQt6.QtGui import QFont
 
 from ui.wave_widget import WaveWidget
 from ui.sqi_indicator import SqiIndicator
+import pyqtgraph as pg
 from ui.trend_panel import TrendPanel
 from config.i18n import tr, I18n
+
+class _PulseWaveWidget(QWidget):
+    def __init__(self, title="", parent=None, fs=20.0):
+        super().__init__(parent)
+        self._fs=fs; self._max_pts=int(3*fs)
+        self._data=np.zeros(self._max_pts,dtype=np.float32)
+        l=QVBoxLayout(self); l.setContentsMargins(0,0,0,0)
+        self._tl=QLabel(title)
+        self._tl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._tl.setStyleSheet("font-weight:bold;font-size:12pt")
+        l.addWidget(self._tl)
+        self._plt=pg.PlotWidget()
+        self._plt.setMouseEnabled(0,0); self._plt.hideAxis("bottom"); self._plt.hideAxis("left")
+        self._plt.showGrid(1,1,alpha=0.25)
+        self._wv=self._plt.plot(pen=pg.mkPen((200,80,80),width=1.5))
+        self._pk=pg.ScatterPlotItem(size=8,symbol="t1",brush=pg.mkBrush(255,50,50))
+        self._nc=pg.ScatterPlotItem(size=7,symbol="d",brush=pg.mkBrush(50,200,220))
+        self._plt.addItem(self._pk); self._plt.addItem(self._nc)
+        l.addWidget(self._plt)
+    def set_data(self,wf):
+        if len(wf)<2: return
+        if len(wf)>self._max_pts: wf=wf[-self._max_pts:]
+        elif len(wf)<self._max_pts: wf=np.concatenate([np.zeros(self._max_pts-len(wf)),wf])
+        self._data=wf.astype(np.float32); x=np.arange(len(self._data))
+        self._wv.setData(x,self._data)
+        try:
+            p,_=find_peaks(self._data,10,prominence=0.05)
+            if len(p)>0:
+                nx,ny=[],[]
+                for pk in p:
+                    s=int(pk)+1; e=min(int(pk)+int(self._fs*0.3),len(self._data))
+                    if e-s<2: continue
+                    seg=self._data[s:e]; lm=np.argmin(seg)
+                    nv=seg[lm]; pv=self._data[pk]
+                    if nv<pv-0.15*(pv-np.min(self._data)):
+                        nx.append(float(s+lm)); ny.append(float(nv))
+                self._pk.setData(x[p],self._data[p])
+                self._nc.setData(nx,ny)
+            else: self._pk.clear(); self._nc.clear()
+        except: self._pk.clear(); self._nc.clear()
+
+class _QualityDashboard(QWidget):
+    def __init__(self,parent=None):
+        super().__init__(parent)
+        self._m={}
+        l=QHBoxLayout(self); l.setContentsMargins(4,4,4,4)
+        for k,lb,cl in [("pr","PhaseRng","#27ae60"),("br","BreathSNR","#f39c12"),
+                        ("hp","HeartSNR","#e74c3c"),("td","Target","#3498db")]:
+            c=QWidget(); c.setStyleSheet("QWidget{background:#2a2a3a;border-radius:4px}")
+            cl=QVBoxLayout(c); cl.setContentsMargins(6,4,6,4)
+            cl.addWidget(QLabel(lb))
+            v=QLabel("--"); v.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            v.setStyleSheet(f"color:{cl};font-size:14pt;font-weight:bold")
+            cl.addWidget(v); l.addWidget(c); self._m[k]=(v,cl)
+        l.addStretch()
+    def update(self,pr=0.0,br=0.0,hp=0.0,td=0.0):
+        vals={"pr":pr,"br":br*100,"hp":hp*10,"td":td}
+        for k,v in vals.items():
+            if k in self._m:
+                self._m[k][0].setText(f"{v:.1f}" if v>=0 else "--")
+
 
 
 class ResearchTab(QWidget):
@@ -22,6 +86,8 @@ class ResearchTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._sqi_level = 0
+        self._quality_dashboard = _QualityDashboard()
+        self._pulse_wave = _PulseWaveWidget(fs=20.0)
         self._debug_expanded = False
         self._last_bpm_label_update: float = 0.0
         self._setup_ui()
@@ -74,6 +140,10 @@ class ResearchTab(QWidget):
 
         algo_row.addStretch()
         layout.addLayout(algo_row)
+
+        # Quality dashboard
+        self._qd = _QualityDashboard(self)
+        layout.addWidget(self._qd)
 
         # Waveforms
         wave_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -241,7 +311,9 @@ class ResearchTab(QWidget):
         self._heart_bpm_label.setText("--")
         self._breath_wave.set_data(np.array([], dtype=np.float32))
         self._heart_wave.set_data(np.array([], dtype=np.float32))
+        self._pulse_wave.set_data(np.array([], dtype=np.float32))
         self._sqi.set_level(0.0, 0.0)
+        self._quality_dashboard.update(0,0,0,0)
         self._trend.start()
         self._debug_panel.clear()
 
@@ -254,6 +326,7 @@ class ResearchTab(QWidget):
         quality: dict | None,
         sample_for_trend: bool = False,
         dsp_telemetry: dict | None = None,
+        target_distance_m: float = 0.0,
         benchmark_elapsed: float = 0.0,
     ) -> None:
         # Waveforms
@@ -261,6 +334,7 @@ class ResearchTab(QWidget):
             self._breath_wave.set_data(breath_waveform)
         if len(heart_waveform) > 0:
             self._heart_wave.set_data(heart_waveform)
+            self._pulse_wave.set_data(heart_waveform)
 
         # BPM (标签 500ms 节流防闪烁)
         now = time.time()
@@ -276,6 +350,15 @@ class ResearchTab(QWidget):
         phase_range = quality.get("phase_range", 0.0) if quality else 0.0
         breath_ratio = quality.get("breath_ratio", 0.0) if quality else 0.0
         self._sqi_level = self._sqi.set_level(breath_ratio, phase_range)
+
+        # Quality Dashboard
+        heart_prom = quality.get("heart_prominence", 0.0) if quality else 0.0
+        self._quality_dashboard.update(
+            pr=phase_range,
+            br=breath_ratio,
+            hp=heart_prom,
+            td=target_distance_m,
+        )
 
         # Trend (throttled to ~1 sample/sec)
         if sample_for_trend:

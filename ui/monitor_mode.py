@@ -297,6 +297,7 @@ class HRMode(MonitorMode):
             sample_for_trend=trend_sample,
             dsp_telemetry=dsp_telemetry,
             benchmark_elapsed=benchmark_elapsed,
+            target_distance_m=target_distance_m,
         )
 
         # Waveform accumulation
@@ -536,6 +537,7 @@ class BPMode(MonitorMode):
                 sample_for_trend=False,
                 dsp_telemetry=dsp_telemetry,
                 benchmark_elapsed=benchmark_elapsed,
+                target_distance_m=r.target_distance_m if hasattr(r, 'target_distance_m') else 0.0,
             )
 
             status_label.setText("● Monitoring")
