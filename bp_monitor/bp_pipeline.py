@@ -203,8 +203,8 @@ class BPPipeline:
         self._bad_signal_count: int = 0
 
         # Temporal smoothing
-        self._sbp_history: deque[float] = deque(maxlen=10)
-        self._dbp_history: deque[float] = deque(maxlen=10)
+        self._sbp_history: deque[float] = deque(maxlen=6)
+        self._dbp_history: deque[float] = deque(maxlen=6)
         self._sbp_ema: float | None = None
         self._dbp_ema: float | None = None
 

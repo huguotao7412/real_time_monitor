@@ -61,12 +61,12 @@ user_calib_sbp: float = 0.0, user_calib_dbp: float = 0.0
 
         # 确保有足够数据去头掐尾
     if len(sorted_peaks) >= 3:
-            raw_sbp = float(np.max(sorted_peaks[1:-1]))
+            raw_sbp = float(np.mean(sorted_peaks[-3:]))
     else:
             raw_sbp = float(np.max(sorted_peaks))
 
     if len(sorted_valleys) >= 3:
-            raw_dbp = float(np.min(sorted_valleys[1:-1]))
+            raw_dbp = float(np.mean(sorted_valleys[:3]))
     else:
             raw_dbp = float(np.min(sorted_valleys))
 

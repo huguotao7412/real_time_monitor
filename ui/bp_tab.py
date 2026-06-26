@@ -186,11 +186,13 @@ class BPTab(QWidget):
             pen=pg.mkPen("#e74c3c", width=1.5),
             symbol='o', symbolBrush='#e74c3c', symbolPen=None, symbolSize=5,
             name="SBP",
+            connect='finite'
         )
         self._dbp_curve = self._trend_plot.plot(
             pen=pg.mkPen("#3498db", width=1.5),
             symbol='o', symbolBrush='#3498db', symbolPen=None, symbolSize=5,
             name="DBP",
+            connect='finite'
         )
         layout.addWidget(self._trend_plot, stretch=1)
 
@@ -253,25 +255,25 @@ class BPTab(QWidget):
         self._dbp_panel.set_value(r.dbp)
 
         # Append to trend data (valid readings only)
-        if not np.isnan(r.sbp) and not np.isnan(r.dbp):
-            elapsed = r.timestamp - self._first_timestamp
-            self._trend_time.append(elapsed)
-            self._trend_sbp.append(r.sbp)
-            self._trend_dbp.append(r.dbp)
+        #if not np.isnan(r.sbp) and not np.isnan(r.dbp):
+        elapsed = r.timestamp - self._first_timestamp
+        self._trend_time.append(elapsed)
+        self._trend_sbp.append(r.sbp)
+        self._trend_dbp.append(r.dbp)
 
-            # Keep max 300 points rolling window
-            MAX_TREND_POINTS = 2000
-            if len(self._trend_time) > MAX_TREND_POINTS:
-                self._trend_time.pop(0)
-                self._trend_sbp.pop(0)
-                self._trend_dbp.pop(0)
+        # Keep max 300 points rolling window
+        MAX_TREND_POINTS = 2000
+        if len(self._trend_time) > MAX_TREND_POINTS:
+            self._trend_time.pop(0)
+            self._trend_sbp.pop(0)
+            self._trend_dbp.pop(0)
 
-            self._sbp_curve.setData(self._trend_time, self._trend_sbp)
-            self._dbp_curve.setData(self._trend_time, self._trend_dbp)
+        self._sbp_curve.setData(self._trend_time, self._trend_sbp)
+        self._dbp_curve.setData(self._trend_time, self._trend_dbp)
 
-            if elapsed > 60:
+        if elapsed > 60:
                 self._trend_plot.setXRange(elapsed - 60, elapsed)
-            else:
+        else:
                 self._trend_plot.setXRange(0, 60)
 
         # Implicit heart rate from systolic peak count
