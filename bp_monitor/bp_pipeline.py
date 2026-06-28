@@ -551,24 +551,37 @@ class BPPipeline:
         if target_bin is not None and new_target_bin != target_bin:
             transition_idx = -self.STEP_FRAMES
 
-            # 提取边界处单点复数 (确保维度为标量复数)
-            old_c = mean_bin_frame_rx[target_bin, transition_idx, :][0]
-            new_c = mean_bin_frame_rx[new_target_bin, transition_idx, :][0]
+            # Guard: if snapshot is smaller than STEP_FRAMES, skip phase
+            # compensation and just switch bins.  This can happen during
+            # early CFAR re-lock before the cold-start threshold is reached.
+            if n < abs(transition_idx):
+                print(
+                    f"[BPPipeline] Target bin updated: {target_bin} → {new_target_bin}"
+                    f" (phase comp skipped: snapshot={n} < step={abs(transition_idx)})"
+                )
+                complex_data = mean_bin_frame_rx[new_target_bin, :, :]
+                target_bin = new_target_bin
+                with self._state_lock:
+                    self._target_bin = target_bin
+            else:
+                # 提取边界处单点复数 (确保维度为标量复数)
+                old_c = mean_bin_frame_rx[target_bin, transition_idx, :][0]
+                new_c = mean_bin_frame_rx[new_target_bin, transition_idx, :][0]
 
-            # 计算复数域的精确相位差 (Old - New)
-            phase_shift_rad = np.angle(old_c * np.conj(new_c))
+                # 计算复数域的精确相位差 (Old - New)
+                phase_shift_rad = np.angle(old_c * np.conj(new_c))
 
-            complex_old = mean_bin_frame_rx[target_bin, :-self.STEP_FRAMES, :]
-            complex_new = mean_bin_frame_rx[new_target_bin, -self.STEP_FRAMES:, :]
+                complex_old = mean_bin_frame_rx[target_bin, :-self.STEP_FRAMES, :]
+                complex_new = mean_bin_frame_rx[new_target_bin, -self.STEP_FRAMES:, :]
 
-            # 【核心修复】在拼接与解包前，先在复数域旋转新信号以对齐旧信号的相位
-            complex_new = complex_new * np.exp(1j * phase_shift_rad)
-            complex_data = np.concatenate([complex_old, complex_new], axis=0)
+                # 【核心修复】在拼接与解包前，先在复数域旋转新信号以对齐旧信号的相位
+                complex_new = complex_new * np.exp(1j * phase_shift_rad)
+                complex_data = np.concatenate([complex_old, complex_new], axis=0)
 
-            print(f"[BPPipeline] Target bin updated: {target_bin} → {new_target_bin}, Phase aligned")
-            target_bin = new_target_bin
-            with self._state_lock:
-                self._target_bin = target_bin
+                print(f"[BPPipeline] Target bin updated: {target_bin} → {new_target_bin}, Phase aligned")
+                target_bin = new_target_bin
+                with self._state_lock:
+                    self._target_bin = target_bin
         else:
             complex_data = mean_bin_frame_rx[target_bin, :, :]  # [N, 1]
 
