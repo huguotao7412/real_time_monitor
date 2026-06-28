@@ -232,6 +232,15 @@ class CalibrationDialog(QDialog):
         self._history_group.toggled.connect(self._refresh_history)
         history_layout = QVBoxLayout(self._history_group)
 
+        # 校准模型信息标签（显示当前 Scale+Bias 参数）
+        self._model_info_label = QLabel()
+        self._model_info_label.setFont(QFont("Segoe UI", 8))
+        self._model_info_label.setStyleSheet(
+            "color: #e74c3c; background: transparent; padding: 2px 0;"
+        )
+        self._model_info_label.setWordWrap(True)
+        history_layout.addWidget(self._model_info_label)
+
         self._history_list = QListWidget()
         self._history_list.setMaximumHeight(150)
         self._history_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -322,7 +331,11 @@ class CalibrationDialog(QDialog):
             self._user_label.setText(f"{tr('lbl_current_user')}：--")
 
     def _refresh_history(self) -> None:
-        """Rebuild history list for the active profile."""
+        """Rebuild history list for the active profile.
+
+        Scale+Bias model: 滑动窗口内的记录以红色背景框选，
+        窗口外的记录以灰色显示。校准参数来自窗口内所有记录的联合拟合。
+        """
         if not hasattr(self, '_history_list'):
             return
 
@@ -333,6 +346,7 @@ class CalibrationDialog(QDialog):
             item = QListWidgetItem(tr("lbl_no_records"))
             item.setFlags(Qt.ItemFlag.NoItemFlags)
             self._history_list.addItem(item)
+            self._model_info_label.setText("")
             return
 
         profile = self._calib_mgr._find_profile(active)
@@ -341,27 +355,66 @@ class CalibrationDialog(QDialog):
             item = QListWidgetItem(tr("lbl_no_records"))
             item.setFlags(Qt.ItemFlag.NoItemFlags)
             self._history_list.addItem(item)
+            self._model_info_label.setText("")
             return
 
-        active_idx = self._calib_mgr.active_record_index
+        # 获取当前 Scale+Bias 参数 + 窗口大小
+        WINDOW_SIZE = 5
+        s_scale, s_bias, d_scale, d_bias = self._calib_mgr.get_calibration_params(
+            active, window_size=WINDOW_SIZE
+        )
+
+        # 计算窗口内的记录索引范围
+        window_start = max(0, len(records) - WINDOW_SIZE)
+        window_indices = set(range(window_start, len(records)))
+
+        # ── 模型信息标签 ──
+        if len(records) == 0:
+            self._model_info_label.setText("")
+        elif len(records) == 1:
+            self._model_info_label.setText(
+                f"当前模型：单点偏移  SBP={s_bias:+.1f}  DBP={d_bias:+.1f} mmHg"
+            )
+        else:
+            n_in_window = len(window_indices)
+            self._model_info_label.setText(
+                f"当前模型：线性拟合 ({n_in_window}条记录)  "
+                f"SBP Scale={s_scale:.2f} Bias={s_bias:+.1f}  "
+                f"DBP Scale={d_scale:.2f} Bias={d_bias:+.1f}"
+            )
+
+        # ── 历史列表 红色框选窗口内的记录 ──
         for i, r in enumerate(records):
-            marker = "★ [生效中] " if i == active_idx else "    "
+            in_window = i in window_indices
+
+            # 窗口标记
+            marker = " ⊡ " if in_window else "   "
             text = (
                 f"{marker}{r['timestamp']}  "
                 f"参考: {r['true_sbp']}/{r['true_dbp']}  "
                 f"测量: {r['measured_sbp']}/{r['measured_dbp']}"
             )
             item = QListWidgetItem(text)
-
-            # [修复 Bug 1] 将这条记录的真实索引隐藏绑定到 item，实现精准操作
             item.setData(Qt.ItemDataRole.UserRole, i)
 
-            # 视觉优化：高亮当前生效的校准记录
-            if i == active_idx:
-                item.setForeground(QColor("#f1c40f"))
+            if in_window:
+                # 红色半透明背景框选 —— 表示该记录参与拟合
+                item.setBackground(QColor(231, 76, 60, 40))  # rgba(231,76,60, ~16%)
+                item.setForeground(QColor("#f5c6cb"))         # 浅红文字
                 font = item.font()
                 font.setBold(True)
                 item.setFont(font)
+
+                # 在 tooltip 提示
+                if len(window_indices) >= 2:
+                    item.setToolTip(
+                        "此记录参与最小二乘拟合，与窗口内其他记录联合计算 Scale+Bias"
+                    )
+                else:
+                    item.setToolTip("当前仅有一条记录，使用单点偏移模式")
+            else:
+                # 窗口外的灰色记录（已被滑动窗口淘汰）
+                item.setForeground(QColor("#555555"))
 
             self._history_list.addItem(item)
 
