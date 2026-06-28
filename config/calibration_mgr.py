@@ -10,6 +10,7 @@ import copy
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal
 
 
@@ -50,17 +51,19 @@ class CalibrationMgr(QObject):
             cls._instance = cls()
         return cls._instance
 
-    # ── current offset (read-only) ────────────────────────────────
+    # ── current offset (read-only, DEPRECATED: prefer get_calibration_params) ──
 
     @property
     def current_sbp_offset(self) -> float:
-        offset, _ = self._compute_current_offset()
-        return offset
+        """DEPRECATED: 返回当前生效的 SBP Bias 值。新代码请使用 get_calibration_params()。"""
+        _, bias_s, _, _ = self.get_calibration_params()
+        return bias_s
 
     @property
     def current_dbp_offset(self) -> float:
-        _, offset = self._compute_current_offset()
-        return offset
+        """DEPRECATED: 返回当前生效的 DBP Bias 值。新代码请使用 get_calibration_params()。"""
+        _, _, _, bias_d = self.get_calibration_params()
+        return bias_d
 
     # ── profile query ─────────────────────────────────────────────
 
@@ -135,21 +138,17 @@ class CalibrationMgr(QObject):
         true_dbp: float,
         measured_sbp: float,
         measured_dbp: float,
+        raw_sbp: float,
+        raw_dbp: float,
     ) -> None:
-        """Add a calibration record for a user. Computes offset automatically.
+        """Add a calibration record for a user.
 
-        offset = true_value - measured_value
+        measured_sbp/dbp: 管线最终校准输出（用于 UI 历史展示）
+        raw_sbp/dbp:      网络原始预测 extract_bp(offset=0)（用于拟合）
         """
         profile = self._find_profile(user_name)
         if profile is None:
             return
-
-        # 1. 获取当前系统正在使用的旧偏移量
-        old_offset_sbp, old_offset_dbp = self._compute_current_offset()
-
-        # 2. 核心修复：计算新偏移量时，把旧偏移量加回来，抵消掉 measured 中包含的旧 offset
-        new_offset_sbp = true_sbp - measured_sbp + old_offset_sbp
-        new_offset_dbp = true_dbp - measured_dbp + old_offset_dbp
 
         record = {
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -157,8 +156,10 @@ class CalibrationMgr(QObject):
             "true_dbp": round(true_dbp, 1),
             "measured_sbp": round(measured_sbp, 1),
             "measured_dbp": round(measured_dbp, 1),
-            "offset_sbp": round(new_offset_sbp, 1),
-            "offset_dbp": round(new_offset_dbp, 1),
+            "offset_sbp": round(true_sbp - raw_sbp, 1),
+            "offset_dbp": round(true_dbp - raw_dbp, 1),
+            "raw_measured_sbp": round(raw_sbp, 1),
+            "raw_measured_dbp": round(raw_dbp, 1),
         }
         profile["records"].append(record)
         self._data["active_profile"] = user_name
@@ -201,6 +202,83 @@ class CalibrationMgr(QObject):
             self._save()
             self.profile_changed.emit()
 
+    # ── Scale+Bias calibration params ──────────────────────────────
+
+    def get_calibration_params(
+        self, user_name: str | None = None, window_size: int = 5
+    ) -> tuple[float, float, float, float]:
+        """基于最近 window_size 条记录计算线性校准参数。
+
+        返回: (sbp_scale, sbp_bias, dbp_scale, dbp_bias)
+
+        三级策略：
+          - 0 条记录 → (1.0, 0.0, 1.0, 0.0)  完全信任网络
+          - 1 条记录 → (1.0, bias, 1.0, bias)  退化 Offset
+          - ≥2 条记录 → 滑动窗口最小二乘 + Scale clamp [0.5, 2.0] + Bias 重算
+        """
+        name = user_name or self._data.get("active_profile")
+        if name is None:
+            return (1.0, 0.0, 1.0, 0.0)
+
+        profile = self._find_profile(name)
+        if profile is None:
+            return (1.0, 0.0, 1.0, 0.0)
+
+        records = profile.get("records", [])
+        if not records:
+            return (1.0, 0.0, 1.0, 0.0)
+
+        # 单点校准：退化为 Offset 模式
+        if len(records) == 1:
+            r = records[0]
+            raw_s = r.get("raw_measured_sbp")
+            if raw_s is None:
+                raw_s = r["measured_sbp"] - r.get("offset_sbp", 0.0)
+            raw_d = r.get("raw_measured_dbp")
+            if raw_d is None:
+                raw_d = r["measured_dbp"] - r.get("offset_dbp", 0.0)
+            bias_s = r["true_sbp"] - raw_s
+            bias_d = r["true_dbp"] - raw_d
+            return (1.0, bias_s, 1.0, bias_d)
+
+        # 多点回归：滑动窗口 + 最小二乘
+        recent = records[-window_size:]
+
+        # 提取 true 和 raw 数组（向后兼容反推）
+        true_s = np.array([r["true_sbp"] for r in recent], dtype=np.float64)
+        true_d = np.array([r["true_dbp"] for r in recent], dtype=np.float64)
+
+        raw_s_list = []
+        raw_d_list = []
+        for r in recent:
+            rs = r.get("raw_measured_sbp")
+            if rs is None:
+                rs = r["measured_sbp"] - r.get("offset_sbp", 0.0)
+            raw_s_list.append(rs)
+            rd = r.get("raw_measured_dbp")
+            if rd is None:
+                rd = r["measured_dbp"] - r.get("offset_dbp", 0.0)
+            raw_d_list.append(rd)
+        raw_s = np.array(raw_s_list, dtype=np.float64)
+        raw_d = np.array(raw_d_list, dtype=np.float64)
+
+        def _fit(raw_vals, true_vals):
+            """最小二乘拟合 y = scale*x + bias，含安全钳制。"""
+            if np.std(raw_vals) < 1e-9:
+                # 所有 raw 值几乎相同 → 矩阵奇异，fallback 为 Offset
+                return 1.0, float(np.mean(true_vals) - np.mean(raw_vals))
+            A = np.column_stack([raw_vals, np.ones_like(raw_vals)])
+            scale, bias = np.linalg.lstsq(A, true_vals, rcond=None)[0]
+            # 安全钳制
+            scale = float(np.clip(scale, 0.5, 2.0))
+            # 用钳制后的 scale 重算 bias，保持配对
+            bias = float(np.mean(true_vals) - scale * np.mean(raw_vals))
+            return scale, bias
+
+        s_scale, s_bias = _fit(raw_s, true_s)
+        d_scale, d_bias = _fit(raw_d, true_d)
+        return (s_scale, s_bias, d_scale, d_bias)
+
     # ── internal ──────────────────────────────────────────────────
 
     def _find_profile(self, user_name: str) -> dict | None:
@@ -209,8 +287,12 @@ class CalibrationMgr(QObject):
                 return p
         return None
 
+    # DEPRECATED: 新代码请使用 get_calibration_params()
     def _compute_current_offset(self) -> tuple[float, float]:
-        """Derive current offset from active profile + record index."""
+        """Derive current offset from active profile + record index.
+
+        DEPRECATED: 仅保留向后兼容。新代码应使用 get_calibration_params()。
+        """
         active = self._data.get("active_profile")
         idx = self._data.get("active_record_index")
         if active is None or idx is None:

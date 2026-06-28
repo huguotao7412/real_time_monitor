@@ -66,8 +66,12 @@ class MainWindow(QMainWindow):
 
         # Calibration manager (survives mode hot-switches)
         self._calib_mgr = CalibrationMgr.instance()
-        self._calib_sbp = self._calib_mgr.current_sbp_offset
-        self._calib_dbp = self._calib_mgr.current_dbp_offset
+        # Scale+Bias model: 从 CalibrationMgr 读取初始四项参数
+        s_scale, s_bias, d_scale, d_bias = self._calib_mgr.get_calibration_params()
+        self._calib_sbp_scale: float = s_scale
+        self._calib_sbp_bias: float = s_bias
+        self._calib_dbp_scale: float = d_scale
+        self._calib_dbp_bias: float = d_bias
 
         self._setup_ui()
         self._setup_timers()
@@ -290,8 +294,10 @@ class MainWindow(QMainWindow):
         self._uart_parser.reset()
         if isinstance(self._current_mode, BPMode):
             self._current_mode.start(
-                calib_sbp=self._calib_sbp,
-                calib_dbp=self._calib_dbp,
+                sbp_scale=self._calib_sbp_scale,
+                sbp_bias=self._calib_sbp_bias,
+                dbp_scale=self._calib_dbp_scale,
+                dbp_bias=self._calib_dbp_bias,
             )
         else:
             self._current_mode.start()
@@ -673,12 +679,13 @@ class MainWindow(QMainWindow):
             self._finish_calibration()
 
     def _finish_calibration(self) -> None:
-        """10-second sampling complete: compute radar average, settle offsets, persist."""
+        """10-second sampling complete: compute radar average, settle params, persist."""
         import numpy as np
         mode: BPMode = self._current_mode
 
-        # 1. Retrieve average radar-measured SBP/DBP over the last 10 seconds
-        measured_sbp, measured_dbp, std_sbp, std_dbp = mode.get_recent_bp_stats(self._calib_duration)
+        # 1. Retrieve both calibrated and raw BP averages over last 10 seconds
+        (measured_sbp, measured_dbp, std_sbp, std_dbp,
+         raw_sbp_mean, raw_dbp_mean) = mode.get_recent_bp_raw_stats(self._calib_duration)
 
         # 2. Guard: no valid radar lock during the 10-second window
         if measured_sbp is None or measured_dbp is None:
@@ -687,24 +694,20 @@ class MainWindow(QMainWindow):
             return
 
         # 2.5 Guard (Quality Control): 检查采样期间血压波动是否过大
-        # 设定阈值：收缩压波动标准差 > 15 mmHg 或 舒张压波动标准差 > 10 mmHg 视为无效采样
         if std_sbp is not None and std_dbp is not None:
-                if std_sbp > 15.0 or std_dbp > 10.0:
-                    print(
-                        f"[Calibration] Rejected due to high variance. SBP std: {std_sbp:.1f}, DBP std: {std_dbp:.1f}")
-                    self._status_label.setText("采样失败：期间体征波动过大，请保持静坐并重新校准")
-                    self._status_label.setStyleSheet("color: #e74c3c;")
-                    return
+            if std_sbp > 15.0 or std_dbp > 10.0:
+                print(
+                    f"[Calibration] Rejected due to high variance. "
+                    f"SBP std: {std_sbp:.1f}, DBP std: {std_dbp:.1f}")
+                self._status_label.setText("采样失败：期间体征波动过大，请保持静坐并重新校准")
+                self._status_label.setStyleSheet("color: #e74c3c;")
+                return
 
         # 3. Auto-create default profile if user chose to save but no profile selected
         if self._calib_save_flag and self._calib_mgr.active_profile_name is None:
             self._calib_mgr.add_profile("默认用户")
 
-        # 4. Compute new offsets
-        new_sbp_offset = self._calib_sbp + (self._calib_target_sbp - measured_sbp)
-        new_dbp_offset = self._calib_dbp + (self._calib_target_dbp - measured_dbp)
-
-        # 5. Persist if requested
+        # 4. Persist calibration record with raw values (Scale+Bias model)
         if self._calib_save_flag:
             active = self._calib_mgr.active_profile_name
             if active is not None:
@@ -714,19 +717,21 @@ class MainWindow(QMainWindow):
                     true_dbp=self._calib_target_dbp,
                     measured_sbp=measured_sbp,
                     measured_dbp=measured_dbp,
+                    raw_sbp=raw_sbp_mean,
+                    raw_dbp=raw_dbp_mean,
                 )
-                # Reload precise offsets from JSON
-                new_sbp_offset = self._calib_mgr.current_sbp_offset
-                new_dbp_offset = self._calib_mgr.current_dbp_offset
 
-        # 6. Store in memory and inject into running pipeline
-        self._calib_sbp = new_sbp_offset
-        self._calib_dbp = new_dbp_offset
+        # 5. Read updated Scale+Bias from CalibrationMgr and apply to pipeline
+        s_scale, s_bias, d_scale, d_bias = self._calib_mgr.get_calibration_params()
+        self._calib_sbp_scale = s_scale
+        self._calib_sbp_bias = s_bias
+        self._calib_dbp_scale = d_scale
+        self._calib_dbp_bias = d_bias
 
         if mode._pipeline is not None:
-            mode._pipeline.set_calibration(new_sbp_offset, new_dbp_offset)
+            mode._pipeline.set_calibration(s_scale, s_bias, d_scale, d_bias)
 
-        # 7. Status feedback
+        # 6. Status feedback
         if self._calib_save_flag:
             self._status_label.setText(
                 f"校准成功: 雷达实测均值 {measured_sbp:.0f}/{measured_dbp:.0f}"
@@ -751,14 +756,17 @@ class MainWindow(QMainWindow):
             self._calib_mgr.add_profile(name.strip())
 
     def _on_calibration_offset_changed(self) -> None:
-        """Re-read offsets from CalibrationMgr and apply to running pipeline."""
-        self._calib_sbp = self._calib_mgr.current_sbp_offset
-        self._calib_dbp = self._calib_mgr.current_dbp_offset
+        """Re-read Scale+Bias from CalibrationMgr and apply to running pipeline."""
+        s_scale, s_bias, d_scale, d_bias = self._calib_mgr.get_calibration_params()
+        self._calib_sbp_scale = s_scale
+        self._calib_sbp_bias = s_bias
+        self._calib_dbp_scale = d_scale
+        self._calib_dbp_bias = d_bias
 
         if isinstance(self._current_mode, BPMode):
             mode: BPMode = self._current_mode
             if mode._pipeline is not None:
-                mode._pipeline.set_calibration(self._calib_sbp, self._calib_dbp)
+                mode._pipeline.set_calibration(s_scale, s_bias, d_scale, d_bias)
 
         # Refresh BPTab profile combo
         self._bp_tab._refresh_profile_combo()

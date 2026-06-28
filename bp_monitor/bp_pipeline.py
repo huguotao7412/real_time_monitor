@@ -208,9 +208,11 @@ class BPPipeline:
         self._sbp_ema: float | None = None
         self._dbp_ema: float | None = None
 
-        # Calibration offsets (injected by MainWindow, survives pipeline rebuild)
-        self._user_calib_sbp: float = 0.0
-        self._user_calib_dbp: float = 0.0
+        # Calibration parameters (Scale+Bias model, injected by MainWindow)
+        self._calib_sbp_scale: float = 1.0
+        self._calib_sbp_bias: float = 0.0
+        self._calib_dbp_scale: float = 1.0
+        self._calib_dbp_bias: float = 0.0
 
     # ======================================================================
     # Public API  (unchanged)
@@ -236,14 +238,17 @@ class BPPipeline:
         self._ab_cleaner = cleaner
         self._ab_enabled = (cleaner is not None)
 
-    def set_calibration(self, sbp_offset: float, dbp_offset: float) -> None:
-        """Set user calibration offsets for SBP/DBP extraction.
+    def set_calibration(self, sbp_scale: float, sbp_bias: float,
+                        dbp_scale: float, dbp_bias: float) -> None:
+        """Set user calibration parameters (Scale+Bias model).
 
         Called by MainWindow on pipeline creation (hot-switch recovery)
         and on calibration confirm.
         """
-        self._user_calib_sbp = sbp_offset
-        self._user_calib_dbp = dbp_offset
+        self._calib_sbp_scale = sbp_scale
+        self._calib_sbp_bias = sbp_bias
+        self._calib_dbp_scale = dbp_scale
+        self._calib_dbp_bias = dbp_bias
 
     def get_dsp_telemetry(self) -> dict:
         """Return current DSP engine telemetry for debug panel."""
@@ -546,24 +551,37 @@ class BPPipeline:
         if target_bin is not None and new_target_bin != target_bin:
             transition_idx = -self.STEP_FRAMES
 
-            # 提取边界处单点复数 (确保维度为标量复数)
-            old_c = mean_bin_frame_rx[target_bin, transition_idx, :][0]
-            new_c = mean_bin_frame_rx[new_target_bin, transition_idx, :][0]
+            # Guard: if snapshot is smaller than STEP_FRAMES, skip phase
+            # compensation and just switch bins.  This can happen during
+            # early CFAR re-lock before the cold-start threshold is reached.
+            if n < abs(transition_idx):
+                print(
+                    f"[BPPipeline] Target bin updated: {target_bin} → {new_target_bin}"
+                    f" (phase comp skipped: snapshot={n} < step={abs(transition_idx)})"
+                )
+                complex_data = mean_bin_frame_rx[new_target_bin, :, :]
+                target_bin = new_target_bin
+                with self._state_lock:
+                    self._target_bin = target_bin
+            else:
+                # 提取边界处单点复数 (确保维度为标量复数)
+                old_c = mean_bin_frame_rx[target_bin, transition_idx, :][0]
+                new_c = mean_bin_frame_rx[new_target_bin, transition_idx, :][0]
 
-            # 计算复数域的精确相位差 (Old - New)
-            phase_shift_rad = np.angle(old_c * np.conj(new_c))
+                # 计算复数域的精确相位差 (Old - New)
+                phase_shift_rad = np.angle(old_c * np.conj(new_c))
 
-            complex_old = mean_bin_frame_rx[target_bin, :-self.STEP_FRAMES, :]
-            complex_new = mean_bin_frame_rx[new_target_bin, -self.STEP_FRAMES:, :]
+                complex_old = mean_bin_frame_rx[target_bin, :-self.STEP_FRAMES, :]
+                complex_new = mean_bin_frame_rx[new_target_bin, -self.STEP_FRAMES:, :]
 
-            # 【核心修复】在拼接与解包前，先在复数域旋转新信号以对齐旧信号的相位
-            complex_new = complex_new * np.exp(1j * phase_shift_rad)
-            complex_data = np.concatenate([complex_old, complex_new], axis=0)
+                # 【核心修复】在拼接与解包前，先在复数域旋转新信号以对齐旧信号的相位
+                complex_new = complex_new * np.exp(1j * phase_shift_rad)
+                complex_data = np.concatenate([complex_old, complex_new], axis=0)
 
-            print(f"[BPPipeline] Target bin updated: {target_bin} → {new_target_bin}, Phase aligned")
-            target_bin = new_target_bin
-            with self._state_lock:
-                self._target_bin = target_bin
+                print(f"[BPPipeline] Target bin updated: {target_bin} → {new_target_bin}, Phase aligned")
+                target_bin = new_target_bin
+                with self._state_lock:
+                    self._target_bin = target_bin
         else:
             complex_data = mean_bin_frame_rx[target_bin, :, :]  # [N, 1]
 
@@ -681,12 +699,23 @@ class BPPipeline:
         )
         bp_waveform = self._bp.predict(input_seq.astype(np.float32))
 
-        # --- SBP / DBP extraction ---
-        sbp, dbp, info = extract_bp(
+        # --- SBP / DBP extraction with Scale+Bias calibration ---
+        # Step A: 获取网络原始预测值（传入 offset=0，获取纯网络输出）
+        raw_sbp, raw_dbp, info = extract_bp(
             bp_waveform, fs=self.FS_TARGET,
-            user_calib_sbp=self._user_calib_sbp,
-            user_calib_dbp=self._user_calib_dbp,
+            user_calib_sbp=0.0,
+            user_calib_dbp=0.0,
         )
+
+        # Step B: 应用 Scale+Bias 校准公式
+        sbp = raw_sbp * self._calib_sbp_scale + self._calib_sbp_bias
+        dbp = raw_dbp * self._calib_dbp_scale + self._calib_dbp_bias
+
+        # [FUTURE] 波形对齐：当 UI 需要渲染校准后的脉搏波形图时，取消下面注释
+        # 对 bp_waveform 数组做仿射变换，使其振幅与校准后数值匹配
+        # avg_scale = (self._calib_sbp_scale + self._calib_dbp_scale) / 2.0
+        # avg_bias = (self._calib_sbp_bias + self._calib_dbp_bias) / 2.0
+        # bp_waveform_calibrated = bp_waveform * avg_scale + avg_bias
 
         info["phase_range"] = phase_range
 
@@ -713,6 +742,8 @@ class BPPipeline:
             frame_index=frame_count,
             sbp=sbp_smooth,
             dbp=dbp_smooth,
+            raw_sbp=raw_sbp,       # 网络原始预测（extract_bp offset=0），用于校准记录存储
+            raw_dbp=raw_dbp,       # 网络原始预测（extract_bp offset=0），用于校准记录存储
             bp_waveform=bp_waveform.astype(np.float32),
             target_distance_m=real_distance,
             quality=info,

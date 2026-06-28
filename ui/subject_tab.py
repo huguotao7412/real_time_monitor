@@ -50,46 +50,51 @@ class SubjectTab(QWidget):
         top_row.addWidget(self._sqi)
         layout.addLayout(top_row)
 
-        # BPM center area
+        # BPM center area — breath + heart on same row
         bpm_area = QVBoxLayout()
         bpm_area.setAlignment(Qt.AlignmentFlag.AlignCenter)
         bpm_area.addStretch()
 
-        # Breath BPM row
-        breath_row = QHBoxLayout()
-        breath_row.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._petals = BreathingPetals(size=80)
-        breath_row.addWidget(self._petals)
+        # Breath + Heart BPM row (并排)
+        vitals_row = QHBoxLayout()
+        vitals_row.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        vitals_row.setSpacing(60)
+
+        # -- 呼吸 (左侧) --
+        breath_col = QVBoxLayout()
+        breath_col.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        breath_col.setSpacing(0)
+        self._petals = BreathingPetals(size=50)
+        breath_col.addWidget(self._petals, alignment=Qt.AlignmentFlag.AlignCenter)
         self._breath_bpm_label = QLabel("--")
-        self._breath_bpm_label.setFont(QFont("Segoe UI", 42, QFont.Weight.Bold))
+        self._breath_bpm_label.setFont(QFont("Segoe UI", 64, QFont.Weight.Bold))
         self._breath_bpm_label.setStyleSheet("color: #27ae60;")
         self._breath_bpm_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        breath_row.addWidget(self._breath_bpm_label)
-        bpm_area.addLayout(breath_row)
-
+        breath_col.addWidget(self._breath_bpm_label)
         self._breath_unit_label = QLabel(tr("breath_rate_unit"))
         self._breath_unit_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._breath_unit_label.setStyleSheet("color: #7f8c8d; font-size: 10pt;")
-        bpm_area.addWidget(self._breath_unit_label)
+        self._breath_unit_label.setStyleSheet("color: #7f8c8d; font-size: 11pt; margin-top: -2px;")
+        breath_col.addWidget(self._breath_unit_label)
+        vitals_row.addLayout(breath_col)
 
-        bpm_area.addSpacing(20)
-
-        # Heart BPM row
-        heart_row = QHBoxLayout()
-        heart_row.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # -- 心率 (右侧) --
+        heart_col = QVBoxLayout()
+        heart_col.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        heart_col.setSpacing(0)
         self._heart_icon = HeartBeatIcon(size=50)
-        heart_row.addWidget(self._heart_icon)
+        heart_col.addWidget(self._heart_icon, alignment=Qt.AlignmentFlag.AlignCenter)
         self._heart_bpm_label = QLabel("--")
-        self._heart_bpm_label.setFont(QFont("Segoe UI", 42, QFont.Weight.Bold))
-        self._heart_bpm_label.setStyleSheet("color: #27ae60;")
+        self._heart_bpm_label.setFont(QFont("Segoe UI", 64, QFont.Weight.Bold))
+        self._heart_bpm_label.setStyleSheet("color: #e74c3c;")
         self._heart_bpm_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        heart_row.addWidget(self._heart_bpm_label)
-        bpm_area.addLayout(heart_row)
-
+        heart_col.addWidget(self._heart_bpm_label)
         self._heart_unit_label = QLabel(tr("heart_rate_unit"))
         self._heart_unit_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._heart_unit_label.setStyleSheet("color: #7f8c8d; font-size: 10pt;")
-        bpm_area.addWidget(self._heart_unit_label)
+        self._heart_unit_label.setStyleSheet("color: #7f8c8d; font-size: 11pt; margin-top: -2px;")
+        heart_col.addWidget(self._heart_unit_label)
+        vitals_row.addLayout(heart_col)
+
+        bpm_area.addLayout(vitals_row)
 
         bpm_area.addStretch()
         layout.addLayout(bpm_area)
