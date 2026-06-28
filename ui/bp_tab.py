@@ -31,7 +31,7 @@ class BPValuePanel(QWidget):
         layout.addWidget(self._label)
 
         self._value = QLabel("--")
-        self._value.setFont(QFont("Segoe UI", 56, QFont.Weight.Bold))
+        self._value.setFont(QFont("Segoe UI", 64, QFont.Weight.Bold))
         self._value.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._value.setStyleSheet(f"color: {color};")
         layout.addWidget(self._value)
