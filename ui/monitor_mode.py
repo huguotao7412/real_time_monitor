@@ -422,15 +422,16 @@ class BPMode(MonitorMode):
             data_cube=rx_combined.reshape(32, 1, 1),
         )
 
-    def start(self, calib_sbp: float = 0.0, calib_dbp: float = 0.0) -> None:
-        """Create and start BP pipeline, optionally injecting calibration offsets."""
+    def start(self, sbp_scale: float = 1.0, sbp_bias: float = 0.0,
+              dbp_scale: float = 1.0, dbp_bias: float = 0.0) -> None:
+        """Create and start BP pipeline, injecting Scale+Bias calibration."""
         from bp_monitor.bp_pipeline import BPPipeline
         cleaner = self._pending_cleaner or EMDPulseCleaner()
         self._pipeline = BPPipeline(
             "bp_matlab/bp_weights.mat",
             cleaner=cleaner,
         )
-        self._pipeline.set_calibration(calib_sbp, calib_dbp)
+        self._pipeline.set_calibration(sbp_scale, sbp_bias, dbp_scale, dbp_bias)
         if self._pending_ab_cleaner is not None:
             self._pipeline.set_ab_strategy(self._pending_ab_cleaner)
         if self._benchmarker is not None:
@@ -575,6 +576,42 @@ class BPMode(MonitorMode):
         return (
             float(np.mean(sbp_vals)), float(np.mean(dbp_vals)),
             float(np.std(sbp_vals)), float(np.std(dbp_vals))
+        )
+
+    def get_recent_bp_raw_stats(self, seconds: float = 10.0) -> tuple[
+        float | None, float | None, float | None, float | None,
+        float | None, float | None]:
+        """Return calibrated and raw BP statistics from recent results.
+
+        Returns (mean_sbp, mean_dbp, std_sbp, std_dbp, mean_raw_sbp, mean_raw_dbp).
+        All None if no valid data in the window.
+
+        mean_sbp/dbp: 管线最终校准输出（用于 UI 显示和标准差检验）
+        mean_raw_sbp/dbp: 网络原始输出 extract_bp(offset=0)（存入校准记录用于后续拟合）
+        """
+        now = time.time()
+        cutoff = now - seconds
+        sbp_vals = []
+        dbp_vals = []
+        raw_sbp_vals = []
+        raw_dbp_vals = []
+        for r in self._bp_results:
+            if r.timestamp >= cutoff:
+                if not np.isnan(r.sbp):
+                    sbp_vals.append(r.sbp)
+                if not np.isnan(r.dbp):
+                    dbp_vals.append(r.dbp)
+                if not np.isnan(r.raw_sbp):
+                    raw_sbp_vals.append(r.raw_sbp)
+                if not np.isnan(r.raw_dbp):
+                    raw_dbp_vals.append(r.raw_dbp)
+        if not sbp_vals or not dbp_vals or not raw_sbp_vals or not raw_dbp_vals:
+            return None, None, None, None, None, None
+
+        return (
+            float(np.mean(sbp_vals)), float(np.mean(dbp_vals)),
+            float(np.std(sbp_vals)), float(np.std(dbp_vals)),
+            float(np.mean(raw_sbp_vals)), float(np.mean(raw_dbp_vals)),
         )
 
     def clear_data(self) -> None:
