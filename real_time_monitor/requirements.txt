@@ -1,0 +1,10 @@
+pyserial>=3.5
+numpy>=1.24
+scipy>=1.10
+pyqt6>=6.5
+pyqtgraph>=0.13
+EMD-signal>=1.6
+PyWavelets>=1.5
+h5py>=3.10
+pyedflib>=0.1.36
+torch>=2.0.0
